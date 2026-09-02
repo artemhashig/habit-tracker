@@ -308,7 +308,7 @@ HTML_CONTENT = """
             <button class="icon-btn"><span class="material-symbols-rounded">format_list_bulleted</span></button>
             <button class="icon-btn"><span class="material-symbols-rounded">sort</span></button>
         </div>
-        <div class="current-date">31 авг.</div>
+        <div class="current-date">3 сент. (v2)</div>
         <button class="add-habit-btn"><span class="material-symbols-rounded">add</span></button>
     </header>
 
