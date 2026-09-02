@@ -1,9 +1,26 @@
-import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-from pyngrok import ngrok
+from fastapi.responses import HTMLResponse, JSONResponse
 
-app = FastAPI(title="Habit Tracker PWA")
+app = FastAPI()
+
+@app.get("/manifest.json")
+async def get_manifest():
+    return JSONResponse(content={
+        "name": "Трекер Привычек",
+        "short_name": "Привычки",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#000000",
+        "theme_color": "#000000",
+        "icons": [
+            {
+                "src": "https://img.icons8.com/ios-filled/500/787aff/checkmark.png",
+                "sizes": "500x500",
+                "type": "image/png"
+            }
+        ]
+    })
+
 
 HTML_CONTENT = """
 <!DOCTYPE html>
@@ -11,6 +28,14 @@ HTML_CONTENT = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+
+    <!-- PWA / iOS нативные настройки -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Привычки">
+    <link rel="apple-touch-icon" href="https://img.icons8.com/ios-filled/500/787aff/checkmark.png">
+    <link rel="manifest" href="/manifest.json">
+
     <title>Трекер Привычек</title>
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
     <style>
@@ -386,6 +411,7 @@ HTML_CONTENT = """
 </body>
 </html>
 """
+
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
