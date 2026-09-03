@@ -59,6 +59,7 @@ async def increment_habit(habit_id: int):
             return habit
     return {"error": "Not found"}
 
+# Путь к скомпилированному фронтенду
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 
 if os.path.exists(frontend_dist):
