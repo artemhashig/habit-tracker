@@ -2,7 +2,7 @@ meta:
   environment: docker
   tool: dockerfile
 build:
-  dockerfile: backend/Dockerfile
+  dockerfile: Dockerfile
 run:
   persistenceMount: /data
   containerPort: 8000
