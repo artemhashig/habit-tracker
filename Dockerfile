@@ -1,12 +1,3 @@
-# ЭТАП 1: Сборка React-фронтенда
-FROM node:20-alpine AS build-frontend
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install
-COPY frontend/ ./
-RUN npm run build
-
-# ЭТАП 2: Запуск FastAPI + раздача собранной статики
 FROM python:3.11-slim
 WORKDIR /app
 
