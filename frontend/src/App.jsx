@@ -5,12 +5,16 @@ import {
 } from 'lucide-react';
 import './App.css';
 
+const API_URL = import.meta.env.PROD
+  ? 'https://habit-tracker-artem443.amvera.io'
+  : 'http://127.0.0.1:8000';
+
 export default function App() {
   const [habits, setHabits] = useState([]);
   const [openCategories, setOpenCategories] = useState({ 'Саморазвитие': true, 'Спорт': true });
 
   useEffect(() => {
-    fetch('http://127.0.0.1:8000/api/habits')
+    fetch(`${API_URL}/api/habits`)
       .then(res => res.json())
       .then(data => setHabits(data))
       .catch(err => console.error(err));
@@ -21,7 +25,7 @@ export default function App() {
   };
 
   const handleIncrement = (id) => {
-    fetch(`http://127.0.0.1:8000/api/habits/${id}/increment`, { method: 'POST' })
+    fetch(`${API_URL}/api/habits/${id}/increment`, { method: 'POST' })
       .then(res => res.json())
       .then(updatedHabit => {
         setHabits(prev => prev.map(h => h.id === id ? updatedHabit : h));
@@ -32,6 +36,7 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* Остальной код JSX без изменений */}
       <header className="header">
         <div className="header-left">
           <button className="icon-btn"><List size={18} /></button>
