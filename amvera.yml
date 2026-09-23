@@ -1,8 +1,10 @@
 meta:
-  environment: docker
-  tool: dockerfile
+  environment: python
+  toolchain:
+    name: pip
+    version: 3.10
 build:
-  dockerfile: Dockerfile
+  requirementsPath: requirements.txt
 run:
-  persistenceMount: /data
-  containerPort: 8000
+  script: uvicorn main:app --host 0.0.0.0 --port 80
+  persistenceMounted: /data
