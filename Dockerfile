@@ -8,11 +8,14 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-COPY requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir -r ./backend/requirements.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY backend/ ./backend/
+COPY main.py db.py llm.py ./
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
+# в постоянном хранилище Amvera монтируется /data — там будет SQLite
+ENV DATA_DIR=/data
+
 EXPOSE 8000
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

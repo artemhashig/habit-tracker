@@ -1,10 +1,11 @@
+# Python-окружение: uvicorn раздаёт API и собранный фронтенд.
+# Фронт собирается локально (npm run build) и коммитится в git (frontend/dist).
 meta:
   environment: python
   toolchain:
     name: pip
-    version: 3.10
-build:
-  requirementsPath: requirements.txt
+    version: "3.11"
 run:
   script: uvicorn main:app --host 0.0.0.0 --port 80
-  persistenceMounted: /data
+  persistenceMount: /data
+  containerPort: 80

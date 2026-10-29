@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# локальная база данных (на Amvera живёт в /data)
+app.db
+app.db-wal
+app.db-shm
+
+# тестовый мусор
+.pytest_cache/
+
+# окружение
+.env

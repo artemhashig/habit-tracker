@@ -8,7 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+# dist НЕ игнорируем: python-окружение Amvera раздаёт собранный фронт из git
 dist-ssr
 *.local
 
