@@ -1,4 +1,4 @@
-"""NLP-модуль: превращает поток сознания из чата в действия над привычками.
+﻿"""NLP-модуль: превращает поток сознания из чата в действия над привычками.
 
 Два уровня:
 1. LLM (по умолчанию Amvera LLM Inference, OpenAI-совместимый API) — основной
@@ -16,9 +16,9 @@ log = logging.getLogger("llm")
 
 # --- Конфигурация LLM (переменные окружения) ------------------------------------
 
-LLM_API_KEY = os.getenv("eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJtVmV0T3hCQlJhcWNpZHdnYUJROEF4UjcwMkk4QmtrRjRseXJWazFKU1BjIn0.eyJleHAiOjE4ODMzMTkzODQsImlhdCI6MTc5MzMxMDY1OCwiYXV0aF90aW1lIjoxNzg4MzY1Nzg0LCJqdGkiOiJvbnJ0bmE6NjBkZTkwYjUtMjdmOS05ODA3LTkyMTQtYTMyMWI0OWY2NDFkIiwiaXNzIjoiaHR0cHM6Ly9pZC5hbXZlcmEucnUvYXV0aC9yZWFsbXMvYW12ZXJhIiwiYXVkIjpbImFjY291bnQiLCJrb25nLTEiXSwic3ViIjoiYTAzZDIxYWMtNzI1ZS00NWFmLTg0NTktMGVjNmE0YTVkMzExIiwidHlwIjoiQmVhcmVyIiwiYXpwIjoiYW12ZXJhLWFwaSIsInNpZCI6ImMzRmlOaWZNYkNFd0ZtQUt5QWNfUkdGZCIsImFjciI6IjEiLCJhbGxvd2VkLW9yaWdpbnMiOlsiLyoiXSwicmVhbG1fYWNjZXNzIjp7InJvbGVzIjpbIm9mZmxpbmVfYWNjZXNzIiwidW1hX2F1dGhvcml6YXRpb24iLCJkZWZhdWx0LXJvbGVzLWFtdmVyYSJdfSwicmVzb3VyY2VfYWNjZXNzIjp7ImFjY291bnQiOnsicm9sZXMiOlsibWFuYWdlLWFjY291bnQiLCJtYW5hZ2UtYWNjb3VudC1saW5rcyIsInZpZXctcHJvZmlsZSJdfX0sInNjb3BlIjoib3BlbmlkIGVtYWlsIHBob25lIHByb2ZpbGUiLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwicHJlZmVycmVkX3VzZXJuYW1lIjoiYXJ0ZW00NDMiLCJlbWFpbCI6ImFydGVtaGFzaWdAZ21haWwuY29tIn0.jbfbc7fiRgxJX2Gb4UWMwAOtHb9ahBi31_pOS1M9eEjiV5pcKXdxUVROVi3vNxMxkftiZRks8Nhhhse6YqIY6gElvj8ZOKl34saqAHhBC4j-XNBxX2Ps2ZTNBWDveGKDfJiPkwTaKOzjlRFEjR1ptmrCh5WUTmiyWHLviCSmcpICaCpxbyw50mFM8HRCZzrwF12kyY8gyrPBojweylJp63zZvZTfujdf7P_nZAgz_VW9L45dvvpM5NQlQo8amxdCfC6Z6hAUY4uJqF20SZHV7mxqhwzqzi6IU1CgBC_bqYRBieE7vTzAY1E8GbbcsUhNX4QJUNQu_oHa1-zo8KcQmg", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://inference.waw0.amvera.ru/v1")
-LLM_MODEL = os.getenv("meta-llama/Llama-3-8B-Instruct", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama70b")  # llama 3.3 70B у Amvera Inference
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 
 DAY_CODES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
