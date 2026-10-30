@@ -2,6 +2,11 @@
 
 База лежит в каталоге DATA_DIR (/data на Amvera сохраняется между деплоями),
 поэтому прогресс пользователей не сбрасывается при перезапуске контейнера.
+
+Изоляция устройств: каждый браузер шлёт свой X-Device-ID, и все привычки/логи/
+история чата выдаются и меняются только в рамках этого идентификатора —
+10 человек на одном сайте не видят и не меняют данные друг друга.
+Старые записи (без device) остаются «ничьими» и никому не показываются.
 """
 import json
 import os
@@ -29,35 +34,6 @@ def connection():
         con.close()
 
 
-# --- Демо-данные (воспроизводят макет) ----------------------------------------
-
-def _seed(c: sqlite3.Connection):
-    today = date.today()
-    # Привычка «с отставанием»: 28 дней в графике Вт/Чт, 7 дней пропущено
-    pushups = c.execute(
-        'INSERT INTO habits (title, category, emoji, days, target, unit, created_at)'
-        " VALUES ('Отжимания','Спорт','🏋️',?,84,'повторение',?)",
-        (json.dumps(["Вт", "Чт"]), (today - timedelta(days=28)).isoformat()),
-    ).lastrowid
-    c.execute(
-        "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, 84)",
-        (pushups, (today - timedelta(days=28)).isoformat()),
-    )
-    # Привычка «на зеленом»: выполняется сегодня → сплошная серия с 1
-    english = c.execute(
-        'INSERT INTO habits (title, category, emoji, days, target, unit, created_at)'
-        " VALUES ('Английский язык','Саморазвитие','📖',?,3,'сеанс',?)",
-        (
-            json.dumps(["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]),
-            (today - timedelta(days=14)).isoformat(),
-        ),
-    ).lastrowid
-    c.execute(
-        "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, 3)",
-        (english, today.isoformat()),
-    )
-
-
 # канонические базовые формы единиц (единственное число, им. падеж)
 _UNIT_CANON = {
     "минут": "минута", "минуты": "минута", "минуту": "минута", "мин": "минута",
@@ -73,7 +49,7 @@ _UNIT_CANON = {
 
 
 def init_db():
-    """Создаёт таблицы и один раз засеивает демо-данные."""
+    """Создаёт таблицы (с демо-данными больше не сеем — люди начинают с нуля)."""
     with connection() as c:
         c.executescript(
             """
@@ -85,7 +61,8 @@ def init_db():
                 days        TEXT NOT NULL,                 -- JSON: ["Пн","Вт"]
                 target      INTEGER NOT NULL DEFAULT 1,    -- план на день
                 unit        TEXT NOT NULL DEFAULT 'раз',   -- ед. изм. в ед. числе
-                created_at  TEXT NOT NULL                  -- YYYY-MM-DD
+                created_at  TEXT NOT NULL,                 -- YYYY-MM-DD
+                device      TEXT NOT NULL DEFAULT ''       -- X-Device-ID владельца
             );
             CREATE TABLE IF NOT EXISTS habit_logs (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,12 +76,18 @@ def init_db():
                 role        TEXT NOT NULL,               -- user / assistant
                 content     TEXT NOT NULL,
                 actions     TEXT,                        -- JSON применённых действий
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                device      TEXT NOT NULL DEFAULT ''     -- X-Device-ID владельца
             );
             """
         )
-        if not c.execute("SELECT 1 FROM habits LIMIT 1").fetchone():
-            _seed(c)
+        # Миграция старых баз (созданных до появления device): добавляем колонку.
+        for table in ("habits", "chat_messages"):
+            cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+            if "device" not in cols:
+                c.execute(
+                    f"ALTER TABLE {table} ADD COLUMN device TEXT NOT NULL DEFAULT ''"
+                )
 
 
 # --- Вспомогательное ----------------------------------------------------------
@@ -153,6 +136,14 @@ def days_label(days: list[str]) -> str:
 
 def _weekday_ru(d: date) -> str:
     return DAY_CODES[d.weekday()]
+
+
+def _owned_id(c: sqlite3.Connection, habit_id: int, device: str) -> int | None:
+    """id привычки, если она принадлежит устройству; иначе None."""
+    row = c.execute(
+        "SELECT id FROM habits WHERE id=? AND device=?", (habit_id, device)
+    ).fetchone()
+    return row["id"] if row else None
 
 
 # --- Привычки -----------------------------------------------------------------
@@ -239,27 +230,33 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, today: date) -> dict:
     }
 
 
-def list_habits() -> list[dict]:
+def list_habits(device: str) -> list[dict]:
     today = date.today()
     with connection() as c:
-        rows = c.execute("SELECT * FROM habits ORDER BY id").fetchall()
+        rows = c.execute(
+            "SELECT * FROM habits WHERE device=? ORDER BY id", (device,)
+        ).fetchall()
         return [_row_to_habit(c, r, today) for r in rows]
 
 
-def get_habit(habit_id: int) -> dict | None:
+def get_habit(habit_id: int, device: str) -> dict | None:
     today = date.today()
     with connection() as c:
-        row = c.execute("SELECT * FROM habits WHERE id=?", (habit_id,)).fetchone()
+        row = c.execute(
+            "SELECT * FROM habits WHERE id=? AND device=?", (habit_id, device)
+        ).fetchone()
         return _row_to_habit(c, row, today) if row else None
 
 
-def find_habit(title: str | None) -> dict | None:
-    """Нечувствительный к регистру поиск по подстроке названия."""
+def find_habit(title: str | None, device: str) -> dict | None:
+    """Нечувствительный к регистру поиск по подстроке названия (в рамках устройства)."""
     if not title:
         return None
     today = date.today()
     with connection() as c:
-        rows = c.execute("SELECT * FROM habits ORDER BY id").fetchall()
+        rows = c.execute(
+            "SELECT * FROM habits WHERE device=? ORDER BY id", (device,)
+        ).fetchall()
         t = title.lower().strip()
         for row in rows:  # точное совпадение приоритетнее
             if row["title"].lower() == t:
@@ -277,17 +274,18 @@ def add_habit(
     days: list[str] | None = None,
     target: int = 1,
     unit: str = "раз",
+    device: str = "",
 ) -> dict:
     """Создаёт привычку и возвращает её в формате выдачи API."""
     valid_days = [d for d in (days or []) if d in DAY_CODES] or list(DAY_CODES)
     title = (title or "").strip() or "Новая привычка"
     title = title[:1].upper() + title[1:]  # «медитация» → «Медитация»
     unit_raw = (unit or "раз").strip().lower()
-    unit = _UNIT_CANON.get(unit_raw, unit_raw)  # «медитация» → «Медитация»
+    unit = _UNIT_CANON.get(unit_raw, unit_raw)  # «минут» → «минута»
     with connection() as c:
-        c.execute(
-            "INSERT INTO habits (title, category, emoji, days, target, unit, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        cur = c.execute(
+            "INSERT INTO habits (title, category, emoji, days, target, unit, created_at, device)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 title,
                 (category or "Другое").strip() or "Другое",
@@ -296,31 +294,33 @@ def add_habit(
                 max(1, int(target or 1)),
                 unit,
                 date.today().isoformat(),
+                device,
             ),
         )
-        habit_id = c.execute(
-            "SELECT id FROM habits ORDER BY id DESC LIMIT 1"
-        ).fetchone()["id"]
-    return get_habit(habit_id)  # type: ignore[return-value]
+        habit_id = cur.lastrowid
+    return get_habit(habit_id, device)  # type: ignore[return-value]
 
 
-def set_target(habit_id: int, new_target: int) -> dict | None:
+def set_target(habit_id: int, new_target: int, device: str) -> dict | None:
     """Снижает/повышает план. Прогресс дня при этом не сбрасывается."""
     with connection() as c:
         c.execute(
-            "UPDATE habits SET target=? WHERE id=?", (max(1, int(new_target)), habit_id)
+            "UPDATE habits SET target=? WHERE id=? AND device=?",
+            (max(1, int(new_target)), habit_id, device),
         )
-    return get_habit(habit_id)
+    return get_habit(habit_id, device)
 
 
-def delete_habit(habit_id: int) -> bool:
+def delete_habit(habit_id: int, device: str) -> bool:
     with connection() as c:
-        cur = c.execute("DELETE FROM habits WHERE id=?", (habit_id,))
+        if _owned_id(c, habit_id, device) is None:
+            return False
         c.execute("DELETE FROM habit_logs WHERE habit_id=?", (habit_id,))
+        cur = c.execute("DELETE FROM habits WHERE id=? AND device=?", (habit_id, device))
         return cur.rowcount > 0
 
 
-def delete_category(name: str) -> int:
+def delete_category(name: str, device: str) -> int:
     """Удаляет все привычки категории вместе с их прогрессом.
 
     Пустых категорий в приложении не бывает: как только удалена последняя
@@ -329,66 +329,75 @@ def delete_category(name: str) -> int:
     with connection() as c:
         ids = [
             r["id"] for r in c.execute(
-                "SELECT id FROM habits WHERE category=?", (name,)
+                "SELECT id FROM habits WHERE category=? AND device=?", (name, device)
             ).fetchall()
         ]
         for i in ids:
             c.execute("DELETE FROM habit_logs WHERE habit_id=?", (i,))
-        cur = c.execute("DELETE FROM habits WHERE category=?", (name,))
+        cur = c.execute(
+            "DELETE FROM habits WHERE category=? AND device=?", (name, device)
+        )
         return cur.rowcount
 
 
-def increment(habit_id: int, step: int = 1) -> dict | None:
+def increment(habit_id: int, device: str, step: int = 1) -> dict | None:
     """Клик «+»: увеличивает сегодняшний счётчик, не трогая историю."""
     day = date.today().isoformat()
     with connection() as c:
+        if _owned_id(c, habit_id, device) is None:
+            return None
         c.execute(
             "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, ?)"
             " ON CONFLICT(habit_id, day) DO UPDATE SET count = count + excluded.count",
             (habit_id, day, step),
         )
-    return get_habit(habit_id)
+    return get_habit(habit_id, device)
 
 
-def complete_today(habit_id: int) -> dict | None:
+def complete_today(habit_id: int, device: str) -> dict | None:
     """Отмечает сегодняшний день выполненным (прогресс = план)."""
-    habit = get_habit(habit_id)
+    habit = get_habit(habit_id, device)
     if not habit:
         return None
-    return set_progress(habit_id, habit["target"])
+    return set_progress(habit_id, habit["target"], device)
 
 
-def set_progress(habit_id: int, count: int) -> dict | None:
+def set_progress(habit_id: int, count: int, device: str) -> dict | None:
     with connection() as c:
+        if _owned_id(c, habit_id, device) is None:
+            return None
         c.execute(
             "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, ?)"
             " ON CONFLICT(habit_id, day) DO UPDATE SET count = excluded.count",
             (habit_id, date.today().isoformat(), max(0, int(count))),
         )
-    return get_habit(habit_id)
+    return get_habit(habit_id, device)
 
 
 # --- Чат -----------------------------------------------------------------------
 
-def add_chat_message(role: str, content: str, actions: list | None = None) -> int:
+def add_chat_message(role: str, content: str, actions: list | None, device: str) -> int:
     with connection() as c:
         cur = c.execute(
-            "INSERT INTO chat_messages (role, content, actions, created_at)"
-            " VALUES (?, ?, ?, ?)",
+            "INSERT INTO chat_messages (role, content, actions, created_at, device)"
+            " VALUES (?, ?, ?, ?, ?)",
             (
                 role,
                 content,
                 json.dumps(actions, ensure_ascii=False) if actions else None,
                 date.today().isoformat(),
+                device,
             ),
         )
         return cur.lastrowid
 
 
-def get_chat_history(limit: int = 50) -> list[dict]:
+def get_chat_history(device: str, limit: int = 50) -> list[dict]:
     with connection() as c:
         rows = c.execute(
-            "SELECT id, role, content, actions FROM chat_messages ORDER BY id"
+            "SELECT id, role, content, actions FROM chat_messages"
+            " WHERE device=? ORDER BY id",
+            (device,),
         ).fetchall()
     return [
         {
@@ -401,9 +410,9 @@ def get_chat_history(limit: int = 50) -> list[dict]:
     ]
 
 
-def clear_chat():
+def clear_chat(device: str):
     with connection() as c:
-        c.execute("DELETE FROM chat_messages")
+        c.execute("DELETE FROM chat_messages WHERE device=?", (device,))
 
 
 init_db()

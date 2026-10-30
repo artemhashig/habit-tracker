@@ -11,6 +11,7 @@ import WeekStrip from './components/WeekStrip.jsx'
 import HabitCard from './components/HabitCard.jsx'
 import CreateHabitScreen from './components/CreateHabitScreen.jsx'
 import useLongPress from './components/useLongPress.js'
+import api from './api.js'
 
 // Тематика категорий (по макету): цвет рамки + цвет кружка-шеврона
 const CATEGORY_META = {
@@ -95,7 +96,7 @@ export default function App() {
   const menuTimer = useRef(null)
 
   const refreshHabits = useCallback((afterSync = false) => {
-    return fetch('/api/habits')
+    return api('/api/habits')
       .then((r) => r.json())
       .then((data) => {
         setHabits(data)
@@ -111,7 +112,7 @@ export default function App() {
 
   const handleIncrement = useCallback(
     (id) => {
-      fetch(`/api/habits/${id}/increment`, { method: 'POST' })
+      api(`/api/habits/${id}/increment`, { method: 'POST' })
         .then(async (r) => {
           const updated = await r.json()
           setHabits((prev) => prev?.map((h) => (h.id === id ? updated : h)) ?? prev)
@@ -138,7 +139,7 @@ export default function App() {
         t.kind === 'habit'
           ? `/api/habits/${t.id}`
           : `/api/categories/${encodeURIComponent(t.name)}`
-      const r = await fetch(url, { method: 'DELETE' })
+      const r = await api(url, { method: 'DELETE' })
       if (!r.ok) throw new Error('bad response')
       setDeleteTarget(null)
       await refreshHabits(true)
@@ -158,7 +159,7 @@ export default function App() {
     setBusy(true)
     setAssistant(null)
     try {
-      const r = await fetch('/api/chat', {
+      const r = await api('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
@@ -211,9 +212,10 @@ export default function App() {
     setCollapsed((prev) => ({ ...prev, [name]: !prev[name] }))
 
   return (
-    // Центрируем «телефон» по центру экрана, фон — чёрный
-    <div className="min-h-screen bg-black text-white flex justify-center font-sans antialiased">
-      <div className="relative w-full max-w-md px-4 flex flex-col min-h-screen">
+    // dvh вместо vh: на iPhone Safari адресная строка меняет видимую высоту,
+    // и с 100vh страница «плавает» вверх-вниз; 100dvh = реальный видимая область
+    <div className="min-h-dvh bg-black text-white flex justify-center font-sans antialiased">
+      <div className="relative w-full max-w-md px-4 flex flex-col min-h-dvh">
         {/* Шапка */}
         <header className="flex justify-between items-center mt-4">
           <button
@@ -238,7 +240,8 @@ export default function App() {
         <WeekStrip activePct={dayProgress} habitDays={habitDays} />
 
         {/* Карточки категорий */}
-        <main className="flex flex-col gap-5 mt-6 pb-2">
+        <main className="flex flex-col gap-5 mt-6 pb-36">
+          {/* pb: запас под фиксированную нижнюю панель ввода, чтобы карточки не прятались */}
           {groups.map(({ name, items }) => (
             <CategorySection
               key={name}
@@ -329,6 +332,13 @@ export default function App() {
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
+                onFocus={(e) =>
+                  // iOS: клавиатура сдвигает визуальную область — плавно подводим страницу к полю
+                  setTimeout(
+                    () => e.target.scrollIntoView({ block: 'end', behavior: 'smooth' }),
+                    250,
+                  )
+                }
                 placeholder="Вылей душу…"
                 maxLength={4000}
                 enterKeyHint="send"

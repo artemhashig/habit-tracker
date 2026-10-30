@@ -9,21 +9,22 @@
   POST   /api/chat          — «вылить душу»: текст → действия над привычками
   GET    /api/chat/history  — история диалога
 
+Данные изолированы по устройствам: каждый браузер шлёт заголовок X-Device-ID,
+все привычки/логи/история чата видны и меняются только в его рамках.
 Статика: собранный фронтенд (frontend/dist) раздаётся как PWA.
 """
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import db
+import llm
 from llm import parse_intent
-
-logging.basicConfig(level=logging.INFO)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -35,6 +36,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+log = logging.getLogger("app")
+log.info(
+    "LLM: model=%s base=%s key=%s",
+    llm.LLM_MODEL,
+    llm.LLM_BASE_URL,
+    "задан (нейронка подключена)" if llm.LLM_API_KEY else "нет — работает fallback-парсер",
 )
 
 
@@ -54,15 +63,20 @@ class HabitIn(BaseModel):
     unit: str = Field(default="раз", max_length=40)
 
 
+def _device(request: Request) -> str:
+    """Идентификатор устройства из заголовка X-Device-ID (браузер хранит его в localStorage)."""
+    return (request.headers.get("X-Device-ID") or "").strip()[:64]
+
+
 # --- Привычки -----------------------------------------------------------------
 
 @app.get("/api/habits")
-async def get_habits():
-    return db.list_habits()
+async def get_habits(request: Request):
+    return db.list_habits(_device(request))
 
 
 @app.post("/api/habits", status_code=201)
-async def create_habit(body: HabitIn):
+async def create_habit(body: HabitIn, request: Request):
     """Создание привычки вручную (форма «Новая привычка»)."""
     return db.add_habit(
         title=body.title,
@@ -71,43 +85,44 @@ async def create_habit(body: HabitIn):
         days=body.days,
         target=body.target,
         unit=body.unit,
+        device=_device(request),
     )
 
 
 @app.post("/api/habits/{habit_id}/increment")
-async def increment_habit(habit_id: int):
-    habit = db.increment(habit_id)
+async def increment_habit(habit_id: int, request: Request):
+    habit = db.increment(habit_id, _device(request))
     if not habit:
         return {"error": "Not found"}
     return habit
 
 
 @app.post("/api/habits/{habit_id}/complete")
-async def complete_habit(habit_id: int):
-    habit = db.complete_today(habit_id)
+async def complete_habit(habit_id: int, request: Request):
+    habit = db.complete_today(habit_id, _device(request))
     if not habit:
         return {"error": "Not found"}
     return habit
 
 
 @app.post("/api/habits/{habit_id}/set-target")
-async def set_habit_target(habit_id: int, body: dict[str, int] | None = None):
+async def set_habit_target(habit_id: int, request: Request, body: dict[str, int] | None = None):
     target = int((body or {}).get("target", 1))
-    habit = db.set_target(habit_id, target)
+    habit = db.set_target(habit_id, target, _device(request))
     if not habit:
         return {"error": "Not found"}
     return habit
 
 
 @app.delete("/api/habits/{habit_id}")
-async def delete_habit(habit_id: int):
-    return {"deleted": db.delete_habit(habit_id)}
+async def delete_habit(habit_id: int, request: Request):
+    return {"deleted": db.delete_habit(habit_id, _device(request))}
 
 
 @app.delete("/api/categories/{category}")
-async def delete_category(category: str):
+async def delete_category(category: str, request: Request):
     """Удаление категории: все её привычки и их прогресс исчезают."""
-    return {"deleted": db.delete_category(category)}
+    return {"deleted": db.delete_category(category, _device(request))}
 
 
 # --- Чат-модуль ----------------------------------------------------------------
@@ -132,7 +147,7 @@ def _coerce_days(raw) -> list[str] | None:
     return None
 
 
-def _apply_actions(actions: list[dict]) -> list[dict]:
+def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
     """Применяет действия из разбора к базе. Возвращает описание в UI-чипах."""
     applied: list[dict] = []
 
@@ -151,6 +166,7 @@ def _apply_actions(actions: list[dict]) -> list[dict]:
                 days=days,
                 target=int(act.get("target") or 1),
                 unit=unit,
+                device=device,
             )
             applied.append({
                 "type": "add_habit",
@@ -168,9 +184,9 @@ def _apply_actions(actions: list[dict]) -> list[dict]:
             if isinstance(habit_id, int) or (
                 isinstance(habit_id, str) and habit_id.isdigit()
             ):
-                habit = db.get_habit(int(habit_id))
+                habit = db.get_habit(int(habit_id), device)
             if habit is None and habit_title:
-                habit = db.find_habit(str(habit_title))
+                habit = db.find_habit(str(habit_title), device)
             if not habit:
                 continue
             new_target = act.get("new_target")
@@ -180,15 +196,15 @@ def _apply_actions(actions: list[dict]) -> list[dict]:
             if new_target >= habit["target"]:
                 continue  # снижение должно быть снижением
             old = habit["target"]
-            updated = db.set_target(habit["id"], new_target)
+            updated = db.set_target(habit["id"], new_target, device)
             applied.append({
                 "type": "reduce_habit",
                 "habit_id": updated["id"],
                 "text": f"Планка снижена: «{updated['title']}» {old} → {new_target} за день",
             })
         elif kind == "delete_habit":
-            habit = db.find_habit(str(act.get("habit_title") or ""))
-            if habit and db.delete_habit(habit["id"]):
+            habit = db.find_habit(str(act.get("habit_title") or ""), device)
+            if habit and db.delete_habit(habit["id"], device):
                 applied.append({
                     "type": "delete_habit",
                     "habit_id": habit["id"],
@@ -200,13 +216,14 @@ def _apply_actions(actions: list[dict]) -> list[dict]:
 
 
 @app.post("/api/chat")
-async def chat(body: ChatIn):
+async def chat(body: ChatIn, request: Request):
     """Приём сообщения: поток сознания → NLP → structured habits в базе."""
+    device = _device(request)
     message = body.message.strip()
-    user_msg_id = db.add_chat_message("user", message)
+    user_msg_id = db.add_chat_message("user", message, None, device)
 
-    habits = db.list_habits()
-    history = db.get_chat_history(limit=12)
+    habits = db.list_habits(device)
+    history = db.get_chat_history(device, limit=12)
 
     try:
         plan = await parse_intent(message, habits, history[:-1])
@@ -217,11 +234,11 @@ async def chat(body: ChatIn):
             "actions": [{"type": "none"}],
         }
 
-    applied = _apply_actions(plan.get("actions") or [])
+    applied = _apply_actions(plan.get("actions") or [], device)
     reply = plan.get("reply") or "Принял."
 
     assistant_msg_id = db.add_chat_message(
-        "assistant", reply, actions=applied or None
+        "assistant", reply, applied or None, device
     )
 
     return {
@@ -233,13 +250,13 @@ async def chat(body: ChatIn):
 
 
 @app.get("/api/chat/history")
-async def chat_history():
-    return db.get_chat_history()
+async def chat_history(request: Request):
+    return db.get_chat_history(_device(request))
 
 
 @app.delete("/api/chat/history")
-async def chat_clear():
-    db.clear_chat()
+async def chat_clear(request: Request):
+    db.clear_chat(_device(request))
     return {"ok": True}
 
 

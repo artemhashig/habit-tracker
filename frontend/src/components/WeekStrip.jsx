@@ -36,10 +36,10 @@ export default function WeekStrip({ activePct = 0, habitDays = [] }) {
           return (
             <div
               key={i}
-              className="flex flex-col items-center justify-between w-[4.5rem] h-[6.75rem] rounded-[30px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
+              className="flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
             >
               <span className="text-[13px] font-extrabold text-white">{code}</span>
-              <div className="relative w-10 h-10 flex items-center justify-center">
+              <div className="relative w-9 h-9 flex items-center justify-center">
                 <svg viewBox="0 0 40 40" className="absolute inset-0 -rotate-90">
                   {/* прогресс вокруг белого круга */}
                   <circle
@@ -61,7 +61,7 @@ export default function WeekStrip({ activePct = 0, habitDays = [] }) {
                     strokeDasharray={`${activePct * RING_CIRC} ${RING_CIRC}`}
                   />
                 </svg>
-                <span className="text-[16px] font-extrabold text-[#232342]">{num}</span>
+                <span className="text-[15px] font-extrabold text-[#232342]">{num}</span>
               </div>
             </div>
           )
@@ -70,19 +70,19 @@ export default function WeekStrip({ activePct = 0, habitDays = [] }) {
         const scheduled = scheduledSet.has(code)
         if (scheduled) {
           return (
-            <div key={i} className="flex flex-col items-center gap-1 w-11">
+            <div key={i} className="flex flex-col items-center gap-1 w-9">
               <span className="text-[13px] font-bold text-white/60">{code}</span>
-              <div className="w-10 h-10 rounded-full bg-[#181928] border border-[#272848] flex items-center justify-center">
-                <span className="text-[15px] font-extrabold text-white">{num}</span>
+              <div className="w-9 h-9 rounded-full bg-[#181928] border border-[#272848] flex items-center justify-center">
+                <span className="text-[14px] font-extrabold text-white">{num}</span>
               </div>
             </div>
           )
         }
 
         return (
-          <div key={i} className="flex flex-col items-center gap-1 w-11">
+          <div key={i} className="flex flex-col items-center gap-1 w-9">
             <span className="text-[13px] font-bold text-white/35">{code}</span>
-            <span className="h-10 flex items-center text-[15px] font-extrabold text-white/60">
+            <span className="h-9 flex items-center text-[14px] font-extrabold text-white/60">
               {num}
             </span>
           </div>

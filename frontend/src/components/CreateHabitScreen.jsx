@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
+import api from '../api.js'
 
 // популярные единицы для быстрого ввода плана
 const UNIT_SUGGESTIONS = ['раз', 'минута', 'страница', 'стакан', 'километр', 'повторение']
@@ -39,7 +40,7 @@ export default function CreateHabitScreen({
     const finalCategory = (isCustomCategory ? newCategory.trim() : category) || 'Другое'
     setBusy(true)
     try {
-      const r = await fetch('/api/habits', {
+      const r = await api('/api/habits', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

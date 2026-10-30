@@ -68,3 +68,14 @@ body {
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+
+/* iOS-адаптивность: гасим «резинку» (прыжки вверх-вниз при скролле)
+   и запрещаем горизонтальный скролл (плавание влево-вправо) */
+html {
+  overscroll-behavior-y: none;
+}
+body {
+  overscroll-behavior: none;
+  overflow-x: clip;
+  background: #000; /* за пределами «телефона» не белеет при отскоке */
+}
