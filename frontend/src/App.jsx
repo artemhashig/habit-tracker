@@ -214,7 +214,7 @@ export default function App() {
   return (
     // dvh вместо vh: на iPhone Safari адресная строка меняет видимую высоту,
     // и с 100vh страница «плавает» вверх-вниз; 100dvh = реальный видимая область
-    <div className="min-h-dvh bg-black text-white flex justify-center font-sans antialiased">
+    <div className="min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
       <div className="relative w-full max-w-md px-4 flex flex-col min-h-dvh">
         {/* Шапка */}
         <header className="flex justify-between items-center mt-4">

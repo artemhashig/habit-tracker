@@ -73,6 +73,7 @@ body {
    и запрещаем горизонтальный скролл (плавание влево-вправо) */
 html {
   overscroll-behavior-y: none;
+  overflow-x: hidden; /* жёсткий запрет горизонтального скролла (и для старых Safari) */
 }
 body {
   overscroll-behavior: none;

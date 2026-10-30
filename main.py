@@ -275,4 +275,9 @@ if os.path.exists(frontend_dist):
         file_path = os.path.join(frontend_dist, full_path)
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+        # index.html — всегда свежий (Safari любит кэшировать его мёртвым грузом,
+        # тогда после обновления интерфейс остаётся старым)
+        return FileResponse(
+            os.path.join(frontend_dist, "index.html"),
+            headers={"Cache-Control": "no-store"},
+        )
