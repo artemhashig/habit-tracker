@@ -126,7 +126,7 @@ export default function CreateHabitScreen({
                 onChange={(e) => setNewCategory(e.target.value)}
                 placeholder="Название новой категории"
                 maxLength={60}
-                className="bg-[#17171f] rounded-2xl px-4 py-3 text-[15px] font-semibold text-white placeholder-white/30 outline-none focus:ring-2 ring-[#6d63f0]/40"
+                className="bg-[#17171f] rounded-2xl px-4 py-3 text-[16px] font-semibold text-white placeholder-white/30 outline-none focus:ring-2 ring-[#6d63f0]/40"
               />
             )}
           </section>
@@ -166,7 +166,7 @@ export default function CreateHabitScreen({
                 placeholder="единица"
                 list="unit-suggestions"
                 maxLength={40}
-                className="flex-1 bg-[#17171f] rounded-2xl px-4 py-3 text-[15px] font-semibold text-white placeholder-white/30 outline-none focus:ring-2 ring-[#6d63f0]/40"
+                className="flex-1 bg-[#17171f] rounded-2xl px-4 py-3 text-[16px] font-semibold text-white placeholder-white/30 outline-none focus:ring-2 ring-[#6d63f0]/40"
                 aria-label="Единица"
               />
               <datalist id="unit-suggestions">

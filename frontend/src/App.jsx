@@ -212,10 +212,11 @@ export default function App() {
     setCollapsed((prev) => ({ ...prev, [name]: !prev[name] }))
 
   return (
-    // dvh вместо vh: на iPhone Safari адресная строка меняет видимую высоту,
-    // и с 100vh страница «плавает» вверх-вниз; 100dvh = реальный видимая область
-    <div className="min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
-      <div className="relative w-full max-w-md px-4 flex flex-col min-h-dvh">
+    // dvh: видимая высота на iOS; h-full: цепочка 100% для старых Safari,
+    // где dvh не поддерживается (иначе в PWA снизу остаётся пустое место);
+    // pt-env: контент не заезжает под статус-бар (зарядка/wifi) в PWA-режиме
+    <div className="h-full min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
+      <div className="relative w-full max-w-md px-4 flex flex-col h-full min-h-dvh pt-[env(safe-area-inset-top)]">
         {/* Шапка */}
         <header className="flex justify-between items-center mt-4">
           <button
@@ -342,7 +343,7 @@ export default function App() {
                 placeholder="Вылей душу…"
                 maxLength={4000}
                 enterKeyHint="send"
-                className="flex-1 min-w-0 bg-transparent outline-none text-[15px] font-semibold text-white placeholder-white/35 py-2"
+                className="flex-1 min-w-0 bg-transparent outline-none text-[16px] font-semibold text-white placeholder-white/35 py-2"
               />
               <button
                 type="submit"
