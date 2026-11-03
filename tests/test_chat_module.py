@@ -334,6 +334,44 @@ check("кривая дата → отдаётся сегодня", bad[0]["curre
 me2 = client.get("/api/me", headers={"X-Device-ID": "device-4"}).json()
 check("повторный визит не дублирует гостя", me2.get("id") == "device-4", str(me2))
 
+print("\n=== 12. Тонкий разбор: время суток ≠ количество, «N/д», дни из текста ===")
+DEV5 = {"X-Device-ID": "device-5", "Content-Type": "application/json"}
+
+# реальный провал LLM №1: время суток уходило в target, дни размазывались на неделю
+r = client.post(
+    "/api/chat",
+    json={"message": "создай привычку в 13:00 вечера прыгать на скакалке по вт 3/д"},
+    headers=DEV5,
+)
+check("чат device-5 → 200", r.status_code == 200)
+rope = next((h for h in client.get("/api/habits", headers=DEV5).json()
+             if "скакалке" in h["title"]), None)
+check("название «Прыгать на скакалке в 13:00»",
+      rope is not None and rope["title"] == "Прыгать на скакалке в 13:00",
+      str(rope and rope["title"]))
+check("дни = только вторник", rope is not None and rope["days"] == ["Вт"], str(rope and rope["days"]))
+check("цель = 3 раза (не 13)",
+      rope is not None and rope["target"] == 3 and rope["unit"] == "раз",
+      str(rope and (rope["target"], rope["unit"])))
+
+# реальный провал LLM №2: вся фраза ушла в название, дни — на все 7
+r = client.post(
+    "/api/chat",
+    json={"message": "создай привычку раз в пн 3 раза прыгать"},
+    headers=DEV5,
+)
+check("второй чат device-5 → 200", r.status_code == 200)
+jump = next((h for h in client.get("/api/habits", headers=DEV5).json()
+             if h["title"] in ("Прыгать", "Прыгнуть")), None)
+check("название = «Прыгать» (без служебного)",
+      jump is not None and jump["title"] == "Прыгать",
+      str(jump and jump["title"]))
+check("дни = только понедельник",
+      jump is not None and jump["days"] == ["Пн"], str(jump and jump["days"]))
+check("цель = 3 раза",
+      jump is not None and jump["target"] == 3 and jump["unit"] == "раз",
+      str(jump and (jump["target"], jump["unit"])))
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)
