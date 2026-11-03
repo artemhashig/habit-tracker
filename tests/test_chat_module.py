@@ -200,6 +200,104 @@ con2 = sqlite3.connect(os.path.join(_TMP, "app.db"))
 no_device = con2.execute("SELECT COUNT(*) FROM habits WHERE device=''").fetchone()[0]
 check("старых записей без device в базе нет", no_device == 0, str(no_device))
 
+print("\n=== 9. Wellbeing: зоны по неделе (80% / 2–3 пропуска / 4+) ===")
+from datetime import date, timedelta  # noqa: E402
+
+DEV3 = {"X-Device-ID": "device-3"}
+run = client.post(
+    "/api/habits",
+    json={"title": "Бег", "category": "Спорт", "target": 2, "unit": "раз"},
+    headers=DEV3,
+).json()
+run_id = run["id"]
+
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("планов нет (создана сегодня) → зона green", w["zone"] == "green", str(w["zone"]))
+
+# сдвигаем дату создания на 8 дней назад → в окне анализа 7 плановых слотов
+con = sqlite3.connect(os.path.join(_TMP, "app.db"))
+con.execute(
+    "UPDATE habits SET created_at=? WHERE id=?",
+    ((date.today() - timedelta(days=8)).isoformat(), run_id),
+)
+con.commit()
+
+# green: 6 закрытых дней из 7 (86%), 1 полный пропуск
+day = date.today()
+for offset in (7, 6, 5, 4, 3, 2):
+    con.execute(
+        "INSERT OR REPLACE INTO habit_logs (habit_id, day, count) VALUES (?, ?, 2)",
+        (run_id, (day - timedelta(days=offset)).isoformat()),
+    )
+con.commit()
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("86% выполнения → green", w["zone"] == "green", f"{w['zone']} pct={w['pct']} skips={w['skippedDays']}")
+
+# yellow: стираем ещё один закрытый день → 5/7 (71%), пропусков 2
+con.execute(
+    "DELETE FROM habit_logs WHERE habit_id=? AND day=?",
+    (run_id, (day - timedelta(days=2)).isoformat()),
+)
+con.commit()
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("2 пропуска → yellow", w["zone"] == "yellow", f"{w['zone']} pct={w['pct']} skips={w['skippedDays']}")
+
+# red: стираем ещё один → 4/7 (57%), пропусков 3... и ещё один → 3/7 (43%), пропусков 4
+con.execute(
+    "DELETE FROM habit_logs WHERE habit_id=? AND day=?",
+    (run_id, (day - timedelta(days=3)).isoformat()),
+)
+con.commit()
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("3 пропуска → yellow", w["zone"] == "yellow", f"{w['zone']} skips={w['skippedDays']}")
+con.execute(
+    "DELETE FROM habit_logs WHERE habit_id=? AND day IN (?, ?)",
+    (run_id, (day - timedelta(days=5)).isoformat(), (day - timedelta(days=4)).isoformat()),
+)
+con.commit()
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("5 пропусков → red (реабилитация)", w["zone"] == "red", f"{w['zone']} skips={w['skippedDays']}")
+
+print("\n=== 10. Заморозка и контрольная точка через диалог ===")
+r = client.post("/api/chat", json={"message": "заморозь бег на 3 дня"}, headers=DEV3)
+data = r.json()
+check("freeze_habit применён через чат",
+      any(a["type"] == "freeze_habit" for a in data["applied"]), str(data["applied"]))
+check("реплика про паузу", "пауз" in data["reply"], data["reply"][:60])
+run_h = next(h for h in client.get("/api/habits", headers=DEV3).json() if h["id"] == run_id)
+check("привычка заморожена", run_h["frozen"] is True, str(run_h["frozen"]))
+check("сегодня не запланирована во время паузы", run_h["scheduledToday"] is False)
+
+r = client.post(
+    "/api/chat", json={"message": "поставь контрольную точку через 4 дня"}, headers=DEV3
+)
+check("set_checkpoint применён через чат",
+      any(a["type"] == "set_checkpoint" for a in r.json()["applied"]), str(r.json()["applied"]))
+w = client.get("/api/wellbeing", headers=DEV3).json()
+active = [c for c in w["checkpoints"] if not c["processed"]]
+check("активная контрольная точка создана", len(active) == 1, str(w["checkpoints"]))
+check("baseline зафиксирован", active and active[0]["baselinePct"] is not None, str(active))
+
+r = client.get("/api/wellbeing/pending", headers=DEV3).json()
+check("ре-анализ не раньше срока", r.get("due") is False, str(r))
+
+# срок наступил → ре-анализ со сравнением
+con.execute(
+    "UPDATE checkpoints SET due_at=? WHERE device='device-3'",
+    (date.today().isoformat(),),
+)
+con.commit()
+r = client.get("/api/wellbeing/pending", headers=DEV3).json()
+check("ре-анализ по сроку открыт", r.get("due") is True, str(r)[:120])
+check("в сообщении сравнение статистики", "Сравнил" in r.get("reply", ""), r.get("reply", "")[:80])
+
+r2 = client.get("/api/wellbeing/pending", headers=DEV3).json()
+check("точка обработана один раз", r2.get("due") is False)
+
+w = client.get("/api/wellbeing", headers=DEV3).json()
+check("следующая контрольная точка авто-поставлена",
+      any(not c["processed"] for c in w["checkpoints"]), str(w["checkpoints"]))
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)

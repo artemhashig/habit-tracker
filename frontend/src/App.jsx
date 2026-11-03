@@ -107,6 +107,14 @@ export default function App() {
 
   useEffect(() => {
     refreshHabits()
+    // Проактивная модель ментального здоровья: если срок контрольной точки вышел,
+    // ассистент сам показывает сравнение статистики «до/после» при открытии.
+    api('/api/wellbeing/pending')
+      .then((r) => r.json())
+      .then((p) => {
+        if (p.due && p.reply) setAssistant({ content: p.reply, actions: [] })
+      })
+      .catch(() => {})
     // Safari для доступности игнорирует user-scalable=no в meta — ловим сам жест:
     // gesturestart = начало щипка двумя пальцами; preventDefault останавливает его
     const blockPinch = (e) => e.preventDefault()

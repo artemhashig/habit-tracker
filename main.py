@@ -8,6 +8,8 @@
   DELETE /api/habits/{id}   — удалить привычку
   POST   /api/chat          — «вылить душу»: текст → действия над привычками
   GET    /api/chat/history  — история диалога
+  GET    /api/wellbeing          — зона + статистика недели (green/yellow/red)
+  GET    /api/wellbeing/pending  — ре-анализ по созревшим контрольным точкам
 
 Данные изолированы по устройствам: каждый браузер шлёт заголовок X-Device-ID,
 все привычки/логи/история чата видны и меняются только в его рамках.
@@ -15,6 +17,7 @@
 """
 import logging
 import os
+from datetime import date, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +27,7 @@ from pydantic import BaseModel, Field
 
 import db
 import llm
+import wellbeing
 from llm import parse_intent
 
 logging.basicConfig(level=logging.INFO)
@@ -210,6 +214,55 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                     "habit_id": habit["id"],
                     "text": f"Привычка «{habit['title']}» удалена",
                 })
+        elif kind == "freeze_habit":
+            # Временная заморозка: пауза без потери прогресса.
+            habit = None
+            habit_id = act.get("habit_id")
+            habit_title = act.get("habit_title")
+            if isinstance(habit_id, int) or (
+                isinstance(habit_id, str) and habit_id.isdigit()
+            ):
+                habit = db.get_habit(int(habit_id), device)
+            if habit is None and habit_title:
+                habit = db.find_habit(str(habit_title), device)
+            if habit:
+                days = max(1, int(act.get("days") or 7))
+                updated = db.set_freeze(habit["id"], device, days)
+                until = (
+                    (date.today() + timedelta(days=days - 1)).strftime("%d.%m")
+                )
+                applied.append({
+                    "type": "freeze_habit",
+                    "habit_id": updated["id"],
+                    "text": (
+                        f"❄️ «{updated['title']}» на паузе до {until} — "
+                        "прогресс и серия сохранены, дни заморозки не считаются пропущенными"
+                    ),
+                })
+        elif kind == "set_checkpoint":
+            # Контрольная точка: ре-анализ через N дней со сравнением статистики.
+            days = min(14, max(1, int(act.get("days") or 3)))
+            if db.has_pending_checkpoint(device):
+                applied.append({
+                    "type": "set_checkpoint",
+                    "text": "Контрольная точка уже активна — продолжаю наблюдение и вернусь вовремя",
+                })
+            else:
+                info = wellbeing.overview(device)
+                db.add_checkpoint(
+                    device,
+                    due_at=date.today() + timedelta(days=days),
+                    note=str(act.get("note") or act.get("reason") or "")[:200],
+                    baseline_pct=info["pct"],
+                    baseline_skipped=info["skippedDays"],
+                )
+                applied.append({
+                    "type": "set_checkpoint",
+                    "text": (
+                        f"⏳ Контрольная точка через {days} дн. — вернусь со сравнением "
+                        f"статистики (сейчас: {info['pct'] if info['pct'] is not None else '—'}%)"
+                    ),
+                })
         # «none» / неизвестные типы — просто пропускаем
 
     return applied
@@ -225,8 +278,13 @@ async def chat(body: ChatIn, request: Request):
     habits = db.list_habits(device)
     history = db.get_chat_history(device, limit=12)
 
+    # Проактивная модель: зона недели + прямой сигнал усталости
+    fatigue = llm.detect_fatigue(message)
+    info = wellbeing.overview(device, fatigue=fatigue)
+    wellbeing_ctx = {"zone": info["zone"], "stats": info, "prompt": info["prompt"]}
+
     try:
-        plan = await parse_intent(message, habits, history[:-1])
+        plan = await parse_intent(message, habits, history[:-1], wellbeing_ctx)
     except Exception:
         logging.getLogger("chat").exception("NLP parse failed")
         plan = {
@@ -258,6 +316,26 @@ async def chat_history(request: Request):
 async def chat_clear(request: Request):
     db.clear_chat(_device(request))
     return {"ok": True}
+
+
+# --- Wellbeing: проактивная модель ----------------------------------------------
+
+@app.get("/api/wellbeing")
+async def wellbeing_status(request: Request):
+    """Зона green/yellow/red + статистика недели + активные контрольные точки."""
+    device = _device(request)
+    info = wellbeing.overview(device)
+    info["checkpoints"] = db.list_checkpoints(device)
+    return info
+
+
+@app.get("/api/wellbeing/pending")
+async def wellbeing_pending(request: Request):
+    """Созревшие контрольные точки → сравнение «до/после» и реплика ассистента.
+
+    Фронтенд вызывает при открытии приложения; точка помечается отработанной,
+    сразу ставится следующая — наблюдение продолжается автоматически."""
+    return wellbeing.consume_pending(_device(request))
 
 
 # --- Статика PWA ----------------------------------------------------------------

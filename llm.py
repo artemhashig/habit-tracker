@@ -57,9 +57,21 @@ SYSTEM_PROMPT = """Ты — эмпатичный ассистент дневни
   должно быть заметным (например 50–60% от плана).
 - add_habit: добавляй только то, что пользователь хочет отслеживать. В одном ответе
   допустимы и добавление привычки, и снижение нагрузки одновременно.
+- freeze_habit: {"type": "freeze_habit", "habit_title": "...", "days": 7} — временная
+  пауза привычки на N дней (обычно 3–14). Прогресс, серия и история сохраняются,
+  дни заморозки не считаются ни планом, ни пропуском. Названия бери точно из списка.
+- set_checkpoint: {"type": "set_checkpoint", "days": 3, "note": "что наблюдаем"} —
+  контрольная точка ре-анализа через N дней (2–7). После корректировок плана,
+  усталости или восстановления предлагаешь её, чтобы честно сравнить статистику
+  «до/после» и не потерять пользователя.
+- Политика заботы (без токсичной продуктивности): планку никогда не повышаешь сам;
+  при усталости — согласие и бережность, никаких «просто возьми себя в руки»;
+  хвалишь за реальные сдвиги, а не за количество.
+- Wellbeing-зоне посвящён отдельный блок в системном контексте: green/желтая/red —
+  следуй его инструкциям по строгости вмешательства.
 - Если действий не нужно — один элемент {"type": "none"}.
 - Список текущих привычек пользователя (id, название, план, единица, дни) приложен
-  в конце системного контекста. Используй его для reduce/delete.
+  в конце системного контекста. Используй его для reduce/delete/freeze.
 - Верни только JSON, без markdown-обёртки."""
 
 
@@ -69,11 +81,18 @@ def habits_summary(habits: list[dict]) -> str:
         return "У пользователя пока нет привычек."
     lines = []
     for h in habits:
+        frozen = " ❄️ НА ПАУЗЕ" if h.get("frozen") else ""
         lines.append(
             f"- id={h['id']} «{h['title']}» — план {h['target']} {h['unit']}/день, "
             f"дни: {', '.join(h['days'])}, сегодня {h['current']}/{h['target']}"
+            f"{frozen}"
         )
     return "Текущие привычки пользователя:\n" + "\n".join(lines)
+
+
+def detect_fatigue(message: str) -> bool:
+    """Прямой сигнал усталости/выгорания в тексте пользователя."""
+    return bool(_FATIGUE_RE.search(message.lower()))
 
 
 def _extract_json(text: str) -> dict | None:
@@ -99,7 +118,9 @@ def _extract_json(text: str) -> dict | None:
 
 # --- Основной разбор через LLM ---------------------------------------------------
 
-async def llm_parse(message: str, habits: list[dict], history: list[dict]) -> dict:
+async def llm_parse(
+    message: str, habits: list[dict], history: list[dict], wellbeing_prompt: str = ""
+) -> dict:
     """Спрашивает LLM о действиях. Бросает исключение при недоступности."""
     from openai import AsyncOpenAI
 
@@ -122,6 +143,7 @@ async def llm_parse(message: str, habits: list[dict], history: list[dict]) -> di
             "content": (
                 f"Дата сегодня: {date.today().strftime('%d.%m.%Y')}. "
                 + habits_summary(habits)
+                + (("\n\n" + wellbeing_prompt) if wellbeing_prompt else "")
             ),
         },
         {"role": "user", "content": message},
@@ -264,16 +286,59 @@ def _extract_target_unit(text: str) -> tuple[int, str]:
     return 1, "раз"
 
 
-def fallback_parse(message: str, habits: list[dict]) -> dict:
-    """Эвристики без LLM: добавление привычки и снижение нагрузки."""
+def fallback_parse(
+    message: str, habits: list[dict], wellbeing: dict | None = None
+) -> dict:
+    """Эвристики без LLM: добавление привычки, снижение нагрузки,
+    заморозка привычки и контрольные точки. Зона wellbeing задаёт тон ответа
+    при отсутствии явных действий (чек-ин / реабилитация)."""
     text = message.lower()
     today = date.today()
     actions: list[dict] = []
+    zone = (wellbeing or {}).get("zone", "green")
 
     wants_add = bool(_ADD_RE.search(text)) or "привычку" in text
     fatigue = bool(_FATIGUE_RE.search(text))
     explicit_reduce = bool(_REDUCE_RE.search(text))
     heavy = bool(re.search(r"выгор\S*|устал\s+как\s+\S+|нет\s+сил|болю", text))
+
+    # --- заморозка: «заморозь английский на неделю/3 дня», «поставь на паузу» ---
+    if re.search(r"замор\S*|на\s+пау[зкс]\S*|передышк\w+", text):
+        frozen = None
+        if habits:
+            q = _QUOTED_RE.search(message)
+            if q:
+                needle = q.group(1).lower()
+                frozen = next(
+                    (h for h in habits if h["title"].lower() == needle), None
+                ) or next(
+                    (h for h in habits if needle in h["title"].lower()), None
+                )
+            else:
+                frozen = habits[0] if len(habits) == 1 else None
+        if frozen:
+            m = re.search(r"(\d{1,2})\s*(дн\w*|недел\w*)", text)
+            days = 7
+            if m:
+                days = int(m.group(1)) * (7 if m.group(2).startswith("нед") else 1)
+            actions.append(
+                {
+                    "type": "freeze_habit",
+                    "habit_title": frozen["title"],
+                    "days": max(1, min(30, days)),
+                }
+            )
+            wants_add = False  # «заморозь привычку X» — не про создание новой
+
+    # --- контрольная точка: «через 4 дня вернись», «контрольная точка» ----------
+    m_point = re.search(r"(\d{1,2})\s*дн\S*", text)
+    asked_checkpoint = bool(
+        re.search(r"контрольн\w*\s*точк\S*|верн\w+\s*(?:к|через)|напомн\S*\s*через|провер\S*\s*(?:меня|статистику)", text)
+    )
+    if asked_checkpoint and m_point:
+        actions.append(
+            {"type": "set_checkpoint", "days": max(1, int(m_point.group(1)))}
+        )
 
     if wants_add:
         title = _extract_title(text)
@@ -300,6 +365,8 @@ def fallback_parse(message: str, habits: list[dict]) -> dict:
         if explicit_reduce and m:
             explicit_target = int(m.group(1))
         for h in habits:
+            if h.get("frozen"):
+                continue
             done_today = h["current"] >= h["target"]
             if done_today:
                 continue
@@ -316,8 +383,30 @@ def fallback_parse(message: str, habits: list[dict]) -> dict:
                         "reason": "усталость — оставим силы, прогресс сохранён",
                     }
                 )
+        # сильная усталость без явного запроса → помним о ней и следим:
+        # в системе самим приложением ставится контрольная точка ре-анализа
+        if heavy and not explicit_reduce:
+            actions.append(
+                {"type": "set_checkpoint", "days": 3, "reason": "усталость — проследим"}
+            )
 
-    if actions:
+    # --- реплики ---
+    has_checkpoint = any(a["type"] == "set_checkpoint" for a in actions)
+    has_freeze = any(a["type"] == "freeze_habit" for a in actions)
+    if has_freeze:
+        reply = (
+            "Слышу тебя. Привычка на паузе — прогресс, серия и история сохранены, "
+            "дни заморозки не считаются пропущенными. Вернёшься, когда будешь готов(а)."
+        )
+    elif has_checkpoint and not any(
+        a["type"] in ("add_habit", "reduce_habit") for a in actions
+    ):
+        days = next(a["days"] for a in actions if a["type"] == "set_checkpoint")
+        reply = (
+            f"Договорились: контрольная точка через {days} дн. — вернусь "
+            "с честным сравнением статистики и мягким решением."
+        )
+    elif actions:
         has_add = any(a["type"] == "add_habit" for a in actions)
         has_reduce = any(a["type"] == "reduce_habit" for a in actions)
         if has_add and has_reduce:
@@ -328,6 +417,9 @@ def fallback_parse(message: str, habits: list[dict]) -> dict:
             reply = _SUPPORT_REPLIES["fatigue_care"]
         else:
             reply = _SUPPORT_REPLIES["reduce"]
+    elif zone in ("yellow", "red"):
+        from wellbeing import SUPPORT  # локальный импорт — без циклов
+        reply = SUPPORT.get(zone) or _SUPPORT_REPLIES["none"]
     elif fatigue:
         reply = _SUPPORT_REPLIES["fatigue_care"] if heavy else _SUPPORT_REPLIES["none"]
     else:
@@ -336,11 +428,16 @@ def fallback_parse(message: str, habits: list[dict]) -> dict:
     return {"reply": reply, "actions": actions or [{"type": "none"}]}
 
 
-async def parse_intent(message: str, habits: list[dict], history: list[dict]) -> dict:
+async def parse_intent(
+    message: str, habits: list[dict], history: list[dict], wellbeing: dict | None = None
+) -> dict:
     """Точка входа NLP: LLM → при ошибке/отсутствии ключа локальные правила."""
+    wellbeing = wellbeing or {}
     if LLM_API_KEY:
         try:
-            return await llm_parse(message, habits, history)
+            return await llm_parse(
+                message, habits, history, wellbeing.get("prompt", "")
+            )
         except Exception as e:  # noqa: BLE001 — любой сбой уводит в fallback
             log.warning("LLM недоступна, транзакция ушла в fallback: %s", e)
-    return fallback_parse(message, habits)
+    return fallback_parse(message, habits, wellbeing)

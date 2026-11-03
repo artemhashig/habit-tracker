@@ -62,7 +62,9 @@ def init_db():
                 target      INTEGER NOT NULL DEFAULT 1,    -- план на день
                 unit        TEXT NOT NULL DEFAULT 'раз',   -- ед. изм. в ед. числе
                 created_at  TEXT NOT NULL,                 -- YYYY-MM-DD
-                device      TEXT NOT NULL DEFAULT ''       -- X-Device-ID владельца
+                device      TEXT NOT NULL DEFAULT '',      -- X-Device-ID владельца
+                frozen_from TEXT,                          -- пауза «с» (YYYY-MM-DD)
+                frozen_until TEXT                           -- пауза «до» (включительно)
             );
             CREATE TABLE IF NOT EXISTS habit_logs (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,15 +81,28 @@ def init_db():
                 created_at  TEXT NOT NULL,
                 device      TEXT NOT NULL DEFAULT ''     -- X-Device-ID владельца
             );
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                device           TEXT NOT NULL,
+                created_at       TEXT NOT NULL,          -- YYYY-MM-DD
+                due_at           TEXT NOT NULL,          -- когда нужен ре-анализ
+                baseline_pct     REAL,                   -- % выполнения на момент создания
+                baseline_skipped INTEGER,                -- пропусков на момент создания
+                note             TEXT DEFAULT '',
+                processed        INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
-        # Миграция старых баз (созданных до появления device): добавляем колонку.
-        for table in ("habits", "chat_messages"):
+        # Миграция старых баз: недостающие колонки добавляем на месте.
+        for table, column, ddl in (
+            ("habits", "device", "TEXT NOT NULL DEFAULT ''"),
+            ("habits", "frozen_from", "TEXT"),
+            ("habits", "frozen_until", "TEXT"),
+            ("chat_messages", "device", "TEXT NOT NULL DEFAULT ''"),
+        ):
             cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
-            if "device" not in cols:
-                c.execute(
-                    f"ALTER TABLE {table} ADD COLUMN device TEXT NOT NULL DEFAULT ''"
-                )
+            if column not in cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 # --- Вспомогательное ----------------------------------------------------------
@@ -146,14 +161,45 @@ def _owned_id(c: sqlite3.Connection, habit_id: int, device: str) -> int | None:
     return row["id"] if row else None
 
 
+# --- Заморозка (пауза привычки без потери прогресса) ----------------------------
+
+def _frozen_window(row: sqlite3.Row) -> tuple[date | None, date | None]:
+    """(от, до) окна заморозки привычки; None — заморозки нет."""
+    start = end = None
+    try:
+        if row["frozen_from"]:
+            start = date.fromisoformat(row["frozen_from"])
+    except (ValueError, TypeError):
+        pass
+    try:
+        if row["frozen_until"]:
+            end = date.fromisoformat(row["frozen_until"])
+    except (ValueError, TypeError):
+        pass
+    return start, end
+
+
+def _on_freeze(d: date, window: tuple[date | None, date | None]) -> bool:
+    """Попадает ли день в окно заморозки (нейтральный день: не план, не пропуск)."""
+    start, end = window
+    if not end:
+        return False
+    if start and d < start:
+        return False
+    return d <= end
+
+
 # --- Привычки -----------------------------------------------------------------
 
-def _calc_streak(c: sqlite3.Connection, habit_id: int, days: list[str], today: date) -> int:
-    """Серия закрытых запланированных дней, от сегодня назад."""
+def _calc_streak(
+    c: sqlite3.Connection, habit_id: int, days: list[str], today: date,
+    window: tuple[date | None, date | None] = (None, None),
+) -> int:
+    """Серия закрытых запланированных дней, от сегодня назад (заморозка — нейтрально)."""
     streak = 0
     d = today
     for _ in range(60):  # дальше 60 суток историю не считаем
-        if _weekday_ru(d) in days:
+        if _weekday_ru(d) in days and not _on_freeze(d, window):
             log = c.execute(
                 "SELECT count FROM habit_logs WHERE habit_id=? AND day=?",
                 (habit_id, d.isoformat()),
@@ -168,9 +214,12 @@ def _calc_streak(c: sqlite3.Connection, habit_id: int, days: list[str], today: d
 
 
 def _calc_deficit(
-    c: sqlite3.Connection, habit_id: int, days: list[str], created: str, today: date
+    c: sqlite3.Connection, habit_id: int, days: list[str], created: str, today: date,
+    window: tuple[date | None, date | None] = (None, None),
 ) -> int:
-    """Сколько запланированных дней пропущено с даты создания до вчера."""
+    """Сколько запланированных дней пропущено с даты создания до вчера.
+
+    Дни в окне заморозки не считаются пропущенными — пауза без наказания."""
     try:
         start = date.fromisoformat(created)
     except (ValueError, TypeError):
@@ -182,7 +231,7 @@ def _calc_deficit(
     missed = 0
     d = today - timedelta(days=1)
     while d >= start and (today - d).days <= 60:
-        if _weekday_ru(d) in days:
+        if _weekday_ru(d) in days and not _on_freeze(d, window):
             log = c.execute(
                 "SELECT count FROM habit_logs WHERE habit_id=? AND day=?",
                 (habit_id, d.isoformat()),
@@ -201,17 +250,25 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, today: date) -> dict:
         (row["id"], today.isoformat()),
     ).fetchone()
     current = log["count"] if log else 0
-    scheduled_today = _weekday_ru(today) in days
+    window = _frozen_window(row)
+    _, freeze_end = window
+    frozen = bool(freeze_end and freeze_end >= today)
+    scheduled_today = (_weekday_ru(today) in days) and not frozen
     done = row["target"] > 0 and current >= row["target"]
-    status = "done" if done and (scheduled_today or current > 0) else "behind"
+    status = (
+        "frozen" if frozen
+        else ("done" if done and (scheduled_today or current > 0) else "behind")
+    )
 
-    streak = _calc_streak(c, row["id"], days, today)
-    deficit = _calc_deficit(c, row["id"], days, row["created_at"], today)
+    streak = _calc_streak(c, row["id"], days, today, window)
+    deficit = _calc_deficit(c, row["id"], days, row["created_at"], today, window)
 
     label = days_label(days)
     schedule_text = (
         f"{label}, {current}/{row['target']} {plural_count(row['target'], row['unit'])}"
     )
+    if frozen:
+        schedule_text = f"❄️ пауза до {freeze_end.strftime('%d.%m')}, {label}, {current}/{row['target']}"
     return {
         "id": row["id"],
         "title": row["title"],
@@ -227,6 +284,8 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, today: date) -> dict:
         "status": status,
         "scheduledToday": scheduled_today,
         "scheduleText": schedule_text,
+        "frozen": frozen,
+        "frozenUntil": (freeze_end.isoformat() if frozen and freeze_end else None),
     }
 
 
@@ -374,6 +433,24 @@ def set_progress(habit_id: int, count: int, device: str) -> dict | None:
     return get_habit(habit_id, device)
 
 
+def set_freeze(habit_id: int, device: str, days: int = 7) -> dict | None:
+    """Временная пауза привычки: дни в окне заморозки не план и не пропуск.
+
+    Прогресс, серия и история остаются нетронутыми; после даты «до» привычка
+    снова входит в график как раньше. Замораживать повторно — просто обновит окно
+    (стартует с сегодня)."""
+    days = max(1, int(days or 7))
+    today = date.today()
+    with connection() as c:
+        if _owned_id(c, habit_id, device) is None:
+            return None
+        c.execute(
+            "UPDATE habits SET frozen_from=?, frozen_until=? WHERE id=? AND device=?",
+            (today.isoformat(), (today + timedelta(days=days - 1)).isoformat(), habit_id, device),
+        )
+    return get_habit(habit_id, device)
+
+
 # --- Чат -----------------------------------------------------------------------
 
 def add_chat_message(role: str, content: str, actions: list | None, device: str) -> int:
@@ -413,6 +490,82 @@ def get_chat_history(device: str, limit: int = 50) -> list[dict]:
 def clear_chat(device: str):
     with connection() as c:
         c.execute("DELETE FROM chat_messages WHERE device=?", (device,))
+
+
+# --- Контрольные точки (ре-анализ нагрузки) --------------------------------------
+
+def add_checkpoint(
+    device: str,
+    due_at: date,
+    note: str = "",
+    baseline_pct: float | None = None,
+    baseline_skipped: int | None = None,
+) -> int:
+    """Ставит контрольную точку: в due_at система сравнит статистику с baseline."""
+    with connection() as c:
+        cur = c.execute(
+            "INSERT INTO checkpoints"
+            " (device, created_at, due_at, baseline_pct, baseline_skipped, note, processed)"
+            " VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (
+                device,
+                date.today().isoformat(),
+                due_at.isoformat(),
+                baseline_pct,
+                baseline_skipped,
+                (note or "")[:500],
+            ),
+        )
+        return cur.lastrowid
+
+
+def has_pending_checkpoint(device: str) -> bool:
+    """Есть ли ещё необработанная контрольная точка (не нужен дубль)."""
+    with connection() as c:
+        row = c.execute(
+            "SELECT 1 FROM checkpoints WHERE device=? AND processed=0 LIMIT 1",
+            (device,),
+        ).fetchone()
+        return row is not None
+
+
+def get_due_checkpoints(device: str) -> list[sqlite3.Row]:
+    """Контрольные точки, срок которых наступил и которые ещё не отработаны."""
+    with connection() as c:
+        return c.execute(
+            "SELECT * FROM checkpoints WHERE device=? AND processed=0 AND due_at<=?"
+            " ORDER BY id",
+            (device, date.today().isoformat()),
+        ).fetchall()
+
+
+def list_checkpoints(device: str, limit: int = 10) -> list[dict]:
+    """Последние контрольные точки (для GET /api/wellbeing)."""
+    with connection() as c:
+        rows = c.execute(
+            "SELECT id, created_at, due_at, baseline_pct, baseline_skipped, note, processed"
+            " FROM checkpoints WHERE device=? ORDER BY id DESC LIMIT ?",
+            (device, limit),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "createdAt": r["created_at"],
+            "dueAt": r["due_at"],
+            "baselinePct": r["baseline_pct"],
+            "baselineSkipped": r["baseline_skipped"],
+            "note": r["note"],
+            "processed": bool(r["processed"]),
+        }
+        for r in rows
+    ]
+
+
+def mark_checkpoint_processed(checkpoint_id: int):
+    with connection() as c:
+        c.execute(
+            "UPDATE checkpoints SET processed=1 WHERE id=?", (checkpoint_id,)
+        )
 
 
 init_db()
