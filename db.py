@@ -81,6 +81,11 @@ def init_db():
                 created_at  TEXT NOT NULL,
                 device      TEXT NOT NULL DEFAULT ''     -- X-Device-ID владельца
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id         TEXT PRIMARY KEY,            -- X-Device-ID из localStorage
+                name       TEXT NOT NULL DEFAULT 'Гость',
+                created_at TEXT NOT NULL                -- YYYY-MM-DD
+            );
             CREATE TABLE IF NOT EXISTS checkpoints (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 device           TEXT NOT NULL,
@@ -159,6 +164,33 @@ def _owned_id(c: sqlite3.Connection, habit_id: int, device: str) -> int | None:
         "SELECT id FROM habits WHERE id=? AND device=?", (habit_id, device)
     ).fetchone()
     return row["id"] if row else None
+
+
+# --- Пользователи (гостевая система без паролей) ---------------------------------
+
+def ensure_user(device: str, name: str = "Гость") -> str | None:
+    """Регистрирует гостя при первом запросе: id = X-Device-ID из localStorage.
+
+    Паролей нет — идентификатор устройства сам является профилем; повторные
+    вызовы ничего не перезаписывают."""
+    if not device:
+        return None
+    with connection() as c:
+        c.execute(
+            "INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (device, (name or "Гость")[:60], date.today().isoformat()),
+        )
+    return device
+
+
+def get_user(device: str) -> dict | None:
+    """Профиль гостя: id, имя, дата первого визита."""
+    with connection() as c:
+        row = c.execute(
+            "SELECT id, name, created_at FROM users WHERE id=?", (device,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 # --- Заморозка (пауза привычки без потери прогресса) ----------------------------
@@ -242,26 +274,26 @@ def _calc_deficit(
     return missed
 
 
-def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, today: date) -> dict:
-    """Собирает полную карточку привычки: прогресс дня, серия, отставание."""
+def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
+    """Карточка привычки с прогрессом на конкретный день (не только сегодня)."""
     days = json.loads(row["days"])
     log = c.execute(
         "SELECT count FROM habit_logs WHERE habit_id=? AND day=?",
-        (row["id"], today.isoformat()),
+        (row["id"], day.isoformat()),
     ).fetchone()
     current = log["count"] if log else 0
     window = _frozen_window(row)
     _, freeze_end = window
-    frozen = bool(freeze_end and freeze_end >= today)
-    scheduled_today = (_weekday_ru(today) in days) and not frozen
+    frozen = bool(freeze_end and freeze_end >= day)
+    scheduled_today = (_weekday_ru(day) in days) and not frozen
     done = row["target"] > 0 and current >= row["target"]
     status = (
         "frozen" if frozen
         else ("done" if done and (scheduled_today or current > 0) else "behind")
     )
 
-    streak = _calc_streak(c, row["id"], days, today, window)
-    deficit = _calc_deficit(c, row["id"], days, row["created_at"], today, window)
+    streak = _calc_streak(c, row["id"], days, day, window)
+    deficit = _calc_deficit(c, row["id"], days, row["created_at"], day, window)
 
     label = days_label(days)
     schedule_text = (
@@ -289,29 +321,30 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, today: date) -> dict:
     }
 
 
-def list_habits(device: str) -> list[dict]:
-    today = date.today()
+def list_habits(device: str, day: date | None = None) -> list[dict]:
+    """Привычки устройства с прогрессом на день (по умолчанию — сегодня)."""
+    day = day or date.today()
     with connection() as c:
         rows = c.execute(
             "SELECT * FROM habits WHERE device=? ORDER BY id", (device,)
         ).fetchall()
-        return [_row_to_habit(c, r, today) for r in rows]
+        return [_row_to_habit(c, r, day) for r in rows]
 
 
-def get_habit(habit_id: int, device: str) -> dict | None:
-    today = date.today()
+def get_habit(habit_id: int, device: str, day: date | None = None) -> dict | None:
+    day = day or date.today()
     with connection() as c:
         row = c.execute(
             "SELECT * FROM habits WHERE id=? AND device=?", (habit_id, device)
         ).fetchone()
-        return _row_to_habit(c, row, today) if row else None
+        return _row_to_habit(c, row, day) if row else None
 
 
-def find_habit(title: str | None, device: str) -> dict | None:
+def find_habit(title: str | None, device: str, day: date | None = None) -> dict | None:
     """Нечувствительный к регистру поиск по подстроке названия (в рамках устройства)."""
     if not title:
         return None
-    today = date.today()
+    day = day or date.today()
     with connection() as c:
         rows = c.execute(
             "SELECT * FROM habits WHERE device=? ORDER BY id", (device,)
@@ -319,10 +352,10 @@ def find_habit(title: str | None, device: str) -> dict | None:
         t = title.lower().strip()
         for row in rows:  # точное совпадение приоритетнее
             if row["title"].lower() == t:
-                return _row_to_habit(c, row, today)
+                return _row_to_habit(c, row, day)
         for row in rows:
             if t in row["title"].lower():
-                return _row_to_habit(c, row, today)
+                return _row_to_habit(c, row, day)
     return None
 
 
@@ -399,38 +432,39 @@ def delete_category(name: str, device: str) -> int:
         return cur.rowcount
 
 
-def increment(habit_id: int, device: str, step: int = 1) -> dict | None:
-    """Клик «+»: увеличивает сегодняшний счётчик, не трогая историю."""
-    day = date.today().isoformat()
+def increment(habit_id: int, device: str, step: int = 1, day: date | None = None) -> dict | None:
+    """Клик «+»: увеличивает счётчик на день (по умолчанию — сегодня)."""
+    day = day or date.today()
     with connection() as c:
         if _owned_id(c, habit_id, device) is None:
             return None
         c.execute(
             "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, ?)"
             " ON CONFLICT(habit_id, day) DO UPDATE SET count = count + excluded.count",
-            (habit_id, day, step),
+            (habit_id, day.isoformat(), step),
         )
-    return get_habit(habit_id, device)
+    return get_habit(habit_id, device, day)
 
 
-def complete_today(habit_id: int, device: str) -> dict | None:
-    """Отмечает сегодняшний день выполненным (прогресс = план)."""
-    habit = get_habit(habit_id, device)
+def complete_today(habit_id: int, device: str, day: date | None = None) -> dict | None:
+    """Отмечает день выполненным (прогресс = план). Прогресс прошлых дней не трогает."""
+    habit = get_habit(habit_id, device, day)
     if not habit:
         return None
-    return set_progress(habit_id, habit["target"], device)
+    return set_progress(habit_id, habit["target"], device, day)
 
 
-def set_progress(habit_id: int, count: int, device: str) -> dict | None:
+def set_progress(habit_id: int, count: int, device: str, day: date | None = None) -> dict | None:
+    day = day or date.today()
     with connection() as c:
         if _owned_id(c, habit_id, device) is None:
             return None
         c.execute(
             "INSERT INTO habit_logs (habit_id, day, count) VALUES (?, ?, ?)"
             " ON CONFLICT(habit_id, day) DO UPDATE SET count = excluded.count",
-            (habit_id, date.today().isoformat(), max(0, int(count))),
+            (habit_id, day.isoformat(), max(0, int(count))),
         )
-    return get_habit(habit_id, device)
+    return get_habit(habit_id, device, day)
 
 
 def set_freeze(habit_id: int, device: str, days: int = 7) -> dict | None:

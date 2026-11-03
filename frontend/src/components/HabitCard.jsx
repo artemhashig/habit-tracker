@@ -9,8 +9,9 @@ const MINUS = '\u2212' // типографский минус как на мак
  *  - scheduledToday  → жёлтая («отстаём»), бейдж −N, кнопка «+»
  *  - иначе           → нейтральная серая (привычка по другому графику)
  *  Удержание карточки → onLongPress (окно удаления).
+ *  disabled — день в будущем (завтра и позже): просматривать можно, отмечать нельзя.
  */
-export default function HabitCard({ habit, onIncrement, onLongPress }) {
+export default function HabitCard({ habit, onIncrement, onLongPress, disabled = false }) {
   const done = habit.status === 'done'
   const scheduled = Boolean(habit.scheduledToday) || habit.current > 0
   const longPress = useLongPress(() => onLongPress?.())
@@ -38,7 +39,8 @@ export default function HabitCard({ habit, onIncrement, onLongPress }) {
 
         <button
           onClick={() => onIncrement?.(habit.id)}
-          className="mt-1 w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0 text-[#12c25d] transition-transform active:scale-90"
+          disabled={disabled}
+          className="mt-1 w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0 text-[#12c25d] transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
           aria-label={`Отметить «${habit.title}»`}
         >
           <Check size={26} strokeWidth={3} />
@@ -72,7 +74,8 @@ export default function HabitCard({ habit, onIncrement, onLongPress }) {
 
         <button
           onClick={() => onIncrement?.(habit.id)}
-          className="mt-1 w-14 h-14 rounded-full bg-[#4c4416] border border-[#6b6124] flex items-center justify-center flex-shrink-0 text-white transition-transform active:scale-90"
+          disabled={disabled}
+          className="mt-1 w-14 h-14 rounded-full bg-[#4c4416] border border-[#6b6124] flex items-center justify-center flex-shrink-0 text-white transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
           aria-label={`Добавить к «${habit.title}»`}
         >
           <Plus size={26} strokeWidth={2.5} />
@@ -95,7 +98,8 @@ export default function HabitCard({ habit, onIncrement, onLongPress }) {
 
       <button
         onClick={() => onIncrement?.(habit.id)}
-        className="w-14 h-14 rounded-full bg-[#262639] border border-[#35354d] flex items-center justify-center flex-shrink-0 text-white/80 transition-transform active:scale-90"
+        disabled={disabled}
+        className="w-14 h-14 rounded-full bg-[#262639] border border-[#35354d] flex items-center justify-center flex-shrink-0 text-white/80 transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
         aria-label={`Отметить «${habit.title}»`}
       >
         <Plus size={26} strokeWidth={2.5} />

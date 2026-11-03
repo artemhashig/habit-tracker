@@ -298,6 +298,42 @@ w = client.get("/api/wellbeing", headers=DEV3).json()
 check("следующая контрольная точка авто-поставлена",
       any(not c["processed"] for c in w["checkpoints"]), str(w["checkpoints"]))
 
+print("\n=== 11. Гости (users) и работа с датами (вчера/сегодня/завтра) ===")
+DEV4 = {"X-Device-ID": "device-4", "Content-Type": "application/json"}
+
+me = client.get("/api/me", headers={"X-Device-ID": "device-4"}).json()
+check("гость создан автоматически в users", me.get("id") == "device-4", str(me))
+check("у гостя есть имя", me.get("name") == "Гость", str(me))
+
+water = client.post(
+    "/api/habits",
+    json={"title": "Вода", "category": "Здоровье", "target": 2, "unit": "стакана"},
+    headers=DEV4,
+).json()
+yesterday = (date.today() - timedelta(days=1)).isoformat()
+tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+# отметка выполнения за вчера: сначала полный completion через ?date, потом «+»
+r = client.post(f"/api/habits/{water['id']}/complete?date={yesterday}", headers=DEV4).json()
+check("«вчера» закрыт полностью", r.get("current") == 2 and r.get("status") == "done", str(r))
+
+r = client.post(f"/api/habits/{water['id']}/increment?date={yesterday}", headers=DEV4).json()
+check("«+» умеет писать со сдвигом даты", r.get("current") == 3, str(r))
+
+today_view = client.get("/api/habits", headers={"X-Device-ID": "device-4"}).json()
+y_view = client.get(f"/api/habits?date={yesterday}", headers={"X-Device-ID": "device-4"}).json()
+t_view = client.get(f"/api/habits?date={tomorrow}", headers={"X-Device-ID": "device-4"}).json()
+check("сегодня прогресс пуст", today_view[0]["current"] == 0, str(today_view[0]["current"]))
+check("вчера прогресс 3/2 и done", y_view[0]["current"] == 3 and y_view[0]["status"] == "done", str(y_view[0]))
+check("завтра план показывается (0/2)", t_view[0]["current"] == 0, str(t_view[0]["current"]))
+check("серия не сломана «вчерашним» днём", y_view[0]["streak"] >= 1, str(y_view[0]["streak"]))
+
+bad = client.get("/api/habits?date=мусор", headers={"X-Device-ID": "device-4"}).json()
+check("кривая дата → отдаётся сегодня", bad[0]["current"] == 0 and bad[0]["status"] == "behind", str(bad[0]))
+
+me2 = client.get("/api/me", headers={"X-Device-ID": "device-4"}).json()
+check("повторный визит не дублирует гостя", me2.get("id") == "device-4", str(me2))
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)

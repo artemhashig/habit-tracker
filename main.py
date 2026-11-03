@@ -1,9 +1,11 @@
 """Grit — FastAPI backend: трекер привычек + чат-дневник с ИИ.
 
 Маршруты:
-  GET    /api/habits        — привычки с прогрессом за сегодня
-  POST   /api/habits/{id}/increment   — клик «+»
-  POST   /api/habits/{id}/complete    — отметить день выполненным
+  GET    /api/me                — гостевой профиль (id + имя из таблицы users)
+  GET    /api/habits?date=…     — привычки с прогрессом за день (по умолчанию сегодня)
+  POST   /api/habits            — создание привычки (для тестов/LLM; UI создаёт только чат)
+  POST   /api/habits/{id}/increment?date=…  — клик «+» на конкретный день
+  POST   /api/habits/{id}/complete?date=…   — отметить день выполненным
   POST   /api/habits/{id}/set-target  — изменить план (прогресс сохраняется)
   DELETE /api/habits/{id}   — удалить привычку
   POST   /api/chat          — «вылить душу»: текст → действия над привычками
@@ -11,15 +13,16 @@
   GET    /api/wellbeing          — зона + статистика недели (green/yellow/red)
   GET    /api/wellbeing/pending  — ре-анализ по созревшим контрольным точкам
 
-Данные изолированы по устройствам: каждый браузер шлёт заголовок X-Device-ID,
-все привычки/логи/история чата видны и меняются только в его рамках.
-Статика: собранный фронтенд (frontend/dist) раздаётся как PWA.
+Гостевая система вместо паролей: браузер хранит X-Device-ID в localStorage и шлёт
+его в каждом запросе; при первом визите в таблице users создаётся запись-гость.
+Все привычки/логи/история чата изолированы по этому идентификатору — устройства
+не видят и не меняют данные друг друга. Статика: frontend/dist как PWA.
 """
 import logging
 import os
 from datetime import date, timedelta
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -58,7 +61,7 @@ class ChatIn(BaseModel):
 
 
 class HabitIn(BaseModel):
-    """Ручное создание привычки из формы «Новая привычка»."""
+    """Создание привычки через API (интерфейс создаёт привычки только через чат)."""
     title: str = Field(min_length=1, max_length=120)
     category: str = Field(default="Другое", max_length=60)
     emoji: str = Field(default="", max_length=8)
@@ -68,15 +71,38 @@ class HabitIn(BaseModel):
 
 
 def _device(request: Request) -> str:
-    """Идентификатор устройства из заголовка X-Device-ID (браузер хранит его в localStorage)."""
-    return (request.headers.get("X-Device-ID") or "").strip()[:64]
+    """Идентификатор устройства из заголовка X-Device-ID (браузер хранит его в localStorage).
+
+    Заодно регистрирует гостя в таблице users: первая запись создаётся один раз,
+    дальше «ON CONFLICT DO NOTHING»."""
+    device = (request.headers.get("X-Device-ID") or "").strip()[:64]
+    db.ensure_user(device)
+    return device
+
+
+def _parse_day(raw: str) -> date | None:
+    """YYмм-DD строка запроса → date; кривое значение → None (сервер возьмёт сегодня)."""
+    try:
+        return date.fromisoformat((raw or "").strip())
+    except ValueError:
+        return None
+
+
+# --- Пользователи ----------------------------------------------------------------
+
+@app.get("/api/me")
+async def me(request: Request):
+    """Гостевой профиль устройства (создаётся автоматически при первом запросе)."""
+    device = _device(request)
+    return db.get_user(device) or {"id": device, "name": "Гость", "created_at": None}
 
 
 # --- Привычки -----------------------------------------------------------------
 
 @app.get("/api/habits")
-async def get_habits(request: Request):
-    return db.list_habits(_device(request))
+async def get_habits(request: Request, day: str = Query(default="", alias="date")):
+    """Привычки с прогрессом за указанный день (?date=YYYY-MM-DD, по умолчанию сегодня)."""
+    return db.list_habits(_device(request), _parse_day(day))
 
 
 @app.post("/api/habits", status_code=201)
@@ -94,16 +120,22 @@ async def create_habit(body: HabitIn, request: Request):
 
 
 @app.post("/api/habits/{habit_id}/increment")
-async def increment_habit(habit_id: int, request: Request):
-    habit = db.increment(habit_id, _device(request))
+async def increment_habit(
+    habit_id: int, request: Request, day: str = Query(default="", alias="date")
+):
+    """Клик «+» на конкретный день (?date=YYYY-MM-DD, по умолчанию сегодня)."""
+    habit = db.increment(habit_id, _device(request), day=_parse_day(day))
     if not habit:
         return {"error": "Not found"}
     return habit
 
 
 @app.post("/api/habits/{habit_id}/complete")
-async def complete_habit(habit_id: int, request: Request):
-    habit = db.complete_today(habit_id, _device(request))
+async def complete_habit(
+    habit_id: int, request: Request, day: str = Query(default="", alias="date")
+):
+    """Отметить день выполненным (?date=YYYY-MM-DD, по умолчанию сегодня)."""
+    habit = db.complete_today(habit_id, _device(request), day=_parse_day(day))
     if not habit:
         return {"error": "Not found"}
     return habit

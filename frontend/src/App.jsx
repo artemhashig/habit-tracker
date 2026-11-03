@@ -2,14 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Menu,
   ChevronUp,
-  SendHorizontal,
-  Loader2,
-  Check,
-  X,
+  Feather,
+  MessageCircle,
 } from 'lucide-react'
-import WeekStrip from './components/WeekStrip.jsx'
+import WeekStrip, { toISO } from './components/WeekStrip.jsx'
 import HabitCard from './components/HabitCard.jsx'
-import CreateHabitScreen from './components/CreateHabitScreen.jsx'
+import ChatModal from './components/ChatModal.jsx'
 import useLongPress from './components/useLongPress.js'
 import api from './api.js'
 
@@ -23,6 +21,8 @@ const CATEGORY_META = {
   Дом: { emoji: '🏠', border: '#5c4396', circleBg: '#221b3c', icon: '#c4b2ff' },
 }
 const DEFAULT_META = { emoji: '✨', border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
+
+const WEEKDAY_TITLE = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
 
 /** Карточка одной категории: удержание → окно удаления категории. */
 function CategorySection({
@@ -83,36 +83,42 @@ function CategorySection({
 }
 
 export default function App() {
+  const todayISO = useMemo(() => toISO(new Date()), [])
+  const [selected, setSelected] = useState(todayISO) // просматриваемый день (YYYY-MM-DD)
   const [habits, setHabits] = useState(null)
   const [collapsed, setCollapsed] = useState({}) // { [категория]: true }
-  const [createOpen, setCreateOpen] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [assistant, setAssistant] = useState(null) // { content, actions } — карточка ответа
+  const [chatOpen, setChatOpen] = useState(false) // единственное окно дневника
+  const [pendingReply, setPendingReply] = useState(null) // проактивный ре-анализ
   const [syncNote, setSyncNote] = useState('Ожидание начала синхронизации...')
-  const [toast, setToast] = useState(null) // { text, key } — уведомление «пока рано»
+  const [toast, setToast] = useState(null) // { text, key } — уведомление
   const [deleteTarget, setDeleteTarget] = useState(null) // { kind: 'habit'|'category', ... }
   const [deleting, setDeleting] = useState(false)
   const toastTimer = useRef(null)
 
-  const refreshHabits = useCallback((afterSync = false) => {
-    return api('/api/habits')
-      .then((r) => r.json())
-      .then((data) => {
-        setHabits(data)
-        if (afterSync) setSyncNote('Синхронизация завершена ✓')
-      })
-      .catch((e) => console.error('Ошибка загрузки:', e))
-  }, [])
+  const refreshHabits = useCallback(
+    (afterSync = false) => {
+      return api(`/api/habits?date=${selected}`)
+        .then((r) => r.json())
+        .then((data) => {
+          setHabits(data)
+          if (Array.isArray(data) && afterSync) setSyncNote('Синхронизация завершена ✓')
+        })
+        .catch((e) => console.error('Ошибка загрузки:', e))
+    },
+    [selected],
+  )
 
   useEffect(() => {
     refreshHabits()
+  }, [refreshHabits])
+
+  useEffect(() => {
     // Проактивная модель ментального здоровья: если срок контрольной точки вышел,
-    // ассистент сам показывает сравнение статистики «до/после» при открытии.
+    // ассистент сам показывает сравнение статистики «до/после» (в окне дневника).
     api('/api/wellbeing/pending')
       .then((r) => r.json())
       .then((p) => {
-        if (p.due && p.reply) setAssistant({ content: p.reply, actions: [] })
+        if (p.due && p.reply) setPendingReply(p.reply)
       })
       .catch(() => {})
     // Safari для доступности игнорирует user-scalable=no в meta — ловим сам жест:
@@ -123,18 +129,19 @@ export default function App() {
       clearTimeout(toastTimer.current)
       document.removeEventListener('gesturestart', blockPinch)
     }
-  }, [refreshHabits])
+  }, [])
 
   const handleIncrement = useCallback(
     (id) => {
-      api(`/api/habits/${id}/increment`, { method: 'POST' })
+      // отмечаем выполнение в УГОЛОВНО выбранный день (вчера / сегодня / …)
+      api(`/api/habits/${id}/increment?date=${selected}`, { method: 'POST' })
         .then(async (r) => {
           const updated = await r.json()
           setHabits((prev) => prev?.map((h) => (h.id === id ? updated : h)) ?? prev)
         })
         .catch((e) => console.error('Ошибка обновления:', e))
     },
-    [],
+    [selected],
   )
 
   /* Уведомление-заглушка: новое мгновенно заменяет старое (без наложения) */
@@ -159,37 +166,9 @@ export default function App() {
       setDeleteTarget(null)
       await refreshHabits(true)
     } catch {
-      setAssistant({ content: 'Не получилось удалить. Попробуй ещё раз.', actions: [] })
+      pulseToast('Не получилось удалить')
     } finally {
       setDeleting(false)
-    }
-  }
-
-  /* Сообщение ассистенту из нижней строки ввода */
-  const sendChat = async (e) => {
-    e.preventDefault()
-    const text = draft.trim()
-    if (!text || busy) return
-    setDraft('')
-    setBusy(true)
-    setAssistant(null)
-    try {
-      const r = await api('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
-      })
-      const data = await r.json()
-      const actions = data.applied || []
-      setAssistant({ content: data.reply || 'Принял.', actions })
-      if (actions.length > 0) await refreshHabits(true)
-    } catch {
-      setAssistant({
-        content: 'Не получилось связаться с ассистентом. Попробуй ещё раз.',
-        actions: [],
-      })
-    } finally {
-      setBusy(false)
     }
   }
 
@@ -204,24 +183,32 @@ export default function App() {
     return [...acc.entries()].map(([name, items]) => ({ name, items }))
   }, [habits])
 
-  // Существующие категории — для формы создания (порядок как в БД)
-  const categories = useMemo(
-    () => (Array.isArray(habits) ? [...new Set(habits.map((h) => h.category))] : []),
-    [habits],
-  )
-
   // Дни недели, на которые что-то запланировано (для кружков в ленте)
   const habitDays = useMemo(
     () => Array.from(new Set((habits ?? []).flatMap((h) => h.days))),
     [habits],
   )
 
-  // Прогресс дня: доля закрытых привычек из запланированных на сегодня
+  // Прогресс просматриваемого дня: доля закрытых привычек из запланированных
   const dayProgress = useMemo(() => {
     const list = (habits ?? []).filter((h) => h.scheduledToday || h.current > 0)
     if (list.length === 0) return 0
     return list.filter((h) => h.status === 'done').length / list.length
   }, [habits])
+
+  // Завтра и позже — просмотр плана без отметок (выполненного ещё не было)
+  const canMark = selected <= todayISO
+
+  // Заголовок в шапке: сегодня / вчера / завтра / «Пт, 24.10»
+  const title = useMemo(() => {
+    if (selected === todayISO) return 'Сегодня'
+    const d = new Date(`${selected}T00:00:00`)
+    const diff = Math.round((d - new Date(`${todayISO}T00:00:00`)) / 86400000)
+    if (diff === 1) return 'Завтра'
+    if (diff === -1) return 'Вчера'
+    const p = (n) => String(n).padStart(2, '0')
+    return `${WEEKDAY_TITLE[d.getDay()]}, ${p(d.getDate())}.${p(d.getMonth() + 1)}`
+  }, [selected, todayISO])
 
   const toggleCategory = (name) =>
     setCollapsed((prev) => ({ ...prev, [name]: !prev[name] }))
@@ -242,26 +229,26 @@ export default function App() {
             <Menu size={22} />
           </button>
           <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
-            {/* будущие экраны просто передадут другой текст («Завтра», дата…) */}
             <h1 className="text-[19px] font-extrabold tracking-wide whitespace-nowrap">
-              Сегодня
+              {title}
             </h1>
           </div>
           <button
-            onClick={() => setCreateOpen(true)}
-            aria-label="Создать привычку"
-            className="bg-[#6d63f0] px-4 py-2.5 rounded-[22px] hover:bg-[#5f55e0] transition active:scale-90 shadow-lg shadow-indigo-500/25 text-center leading-[1.05] flex-shrink-0"
+            onClick={() => setChatOpen(true)}
+            aria-label="Открыть дневник с ассистентом"
+            className="bg-[#1a1a24] border border-white/5 p-3 rounded-full text-[#8f85ff] transition cursor-pointer hover:bg-[#15151e] active:bg-[#0e0e14] shadow-lg shadow-indigo-500/10"
           >
-            <span className="block text-[13px] font-extrabold text-white">Новая</span>
-            <span className="block text-[13px] font-extrabold text-white">привычка</span>
+            <MessageCircle size={22} />
           </button>
         </header>
 
-        {/* Лента дней */}
+        {/* Лента-скроллер дней: клик → привычки за выбранную дату */}
         <WeekStrip
           activePct={dayProgress}
           habitDays={habitDays}
-          onDayClick={() => pulseToast()}
+          selected={selected}
+          todayISO={todayISO}
+          onSelect={(iso) => setSelected(iso)}
         />
 
         {/* Карточки категорий */}
@@ -298,7 +285,7 @@ export default function App() {
             <div className="rounded-[26px] bg-[#12121a] border border-[#2b2b3c] p-6 text-center">
               <p className="text-[15px] font-bold text-white/80">Пока пусто</p>
               <p className="text-[13px] text-white/45 mt-1">
-                Напиши ассистенту в поле внизу экрана или нажми «Новая привычка» — всё добавится само.
+                Напиши ассистенту в поле внизу экрана — я сам создам привычки из твоих слов.
               </p>
             </div>
           )}
@@ -309,79 +296,25 @@ export default function App() {
           </p>
         </main>
 
-        {/* Нижняя строка ввода (как в мессенджере) + карточка ответа ассистента */}
+        {/* Нижняя строка: выглядит как поле ввода, нажатие открывает единственный дневник */}
         <div className="fixed bottom-0 inset-x-0 z-40 flex justify-center pointer-events-none">
-          <div className="phone-col w-full max-w-md px-4 pt-2 pb-2 pointer-events-auto flex flex-col gap-2">
-            {assistant && (
-              <div className="rise relative rounded-[22px] bg-[#17171f] border border-white/10 px-4 pt-3 pb-3.5 shadow-2xl shadow-black/50">
-                <button
-                  onClick={() => setAssistant(null)}
-                  aria-label="Закрыть ответ"
-                  className="absolute top-2.5 right-2.5 w-7 h-7 rounded-full flex items-center justify-center text-white/40 hover:text-white/80 transition active:scale-90"
-                >
-                  <X size={16} />
-                </button>
-                <div className="flex items-center gap-2 pr-8 mb-1.5">
-                  <span className="w-6 h-6 rounded-full bg-[#6d63f0] flex items-center justify-center text-[11px] text-white">
-                    ✦
-                  </span>
-                  <span className="text-[11px] font-extrabold text-[#a79dff] uppercase tracking-widest">
-                    Ассистент
-                  </span>
-                </div>
-                <p className="text-[14.5px] leading-snug text-white/90 font-semibold whitespace-pre-line pr-2">
-                  {assistant.content}
-                </p>
-                {assistant.actions.length > 0 && (
-                  <div className="flex flex-col gap-1.5 mt-2.5">
-                    {assistant.actions.map((a, i) => (
-                      <div
-                        key={i}
-                        className="flex items-start gap-2 bg-[#6d63f0]/15 rounded-xl px-3 py-2"
-                      >
-                        <Check size={14} className="mt-0.5 text-[#8f85ff] flex-shrink-0" />
-                        <span className="text-[13px] font-bold text-white/90 leading-snug">
-                          {a.text}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <form
-              onSubmit={sendChat}
-              className="flex items-center gap-2 bg-[#17171f] border border-white/10 rounded-full py-1.5 pl-4 pr-1.5 shadow-2xl shadow-black/50"
+          <div className="phone-col w-full max-w-md px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pointer-events-auto">
+            <button
+              onClick={() => setChatOpen(true)}
+              aria-label="Открыть дневник с ассистентом"
+              className="w-full flex items-center gap-2 bg-[#17171f] border border-white/10 rounded-full py-2.5 pl-4 pr-4 shadow-2xl shadow-black/50 transition active:scale-[0.98]"
             >
-              <input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onFocus={(e) =>
-                  // iOS: клавиатура сдвигает визуальную область — плавно подводим страницу к полю
-                  setTimeout(
-                    () => e.target.scrollIntoView({ block: 'end', behavior: 'smooth' }),
-                    250,
-                  )
-                }
-                placeholder="Вылей душу…"
-                maxLength={4000}
-                enterKeyHint="send"
-                className="flex-1 min-w-0 bg-transparent outline-none text-[16px] font-semibold text-white placeholder-white/35 py-2"
-              />
-              <button
-                type="submit"
-                disabled={busy || !draft.trim()}
-                aria-label="Отправить"
-                className="w-10 h-10 rounded-full bg-[#6d63f0] disabled:bg-[#26263a] flex items-center justify-center text-white transition active:scale-90 flex-shrink-0"
-              >
-                {busy ? <Loader2 size={17} className="animate-spin" /> : <SendHorizontal size={17} />}
-              </button>
-            </form>
+              <span className="flex-1 text-left text-[16px] font-semibold text-white/35">
+                Вылей душу…
+              </span>
+              <span className="w-10 h-10 -mr-1 rounded-full bg-[#6d63f0] flex items-center justify-center text-white flex-shrink-0">
+                <Feather size={17} />
+              </span>
+            </button>
           </div>
         </div>
 
-        {/* Уведомление-заглушка (кнопки меню / дней недели): новое заменяет старое */}
+        {/* Уведомление-заглушка (кнопка меню): новое заменяет старое */}
         {toast && (
           <div
             key={toast.key}
@@ -433,18 +366,12 @@ export default function App() {
           </div>
         )}
 
-        {/* Экран «Новая привычка» */}
-        {createOpen && (
-          <CreateHabitScreen
-            categories={categories}
-            onClose={() => setCreateOpen(false)}
-            onCreated={() => {
-              setCreateOpen(false)
-              refreshHabits(true)
-            }}
-            onError={(msg) =>
-              setAssistant({ content: `Не получилось: ${msg}`, actions: [] })
-            }
+        {/* Единственное окно дневника: история хранится в базе, стирается нельзя */}
+        {chatOpen && (
+          <ChatModal
+            pendingReply={pendingReply}
+            onClose={() => setChatOpen(false)}
+            onHabitsChanged={() => refreshHabits(true)}
           />
         )}
       </div>
