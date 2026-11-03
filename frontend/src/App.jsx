@@ -18,7 +18,6 @@ const CATEGORY_META = {
 }
 const DEFAULT_META = { border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
 
-const WEEKDAY_TITLE = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
 const MONTHS_GEN = [
   'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
   'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
@@ -133,15 +132,24 @@ export default function App() {
 
   const handleIncrement = useCallback(
     (id) => {
-      // отмечаем выполнение в УГОЛОВНО выбранный день (вчера / сегодня / …)
+      // оптимистичный отклик: счётчик растёт мгновенно, сервер подтверждает следом
+      setHabits((prev) =>
+        prev?.map((h) => (h.id === id ? { ...h, current: (h.current || 0) + 1 } : h)) ?? prev,
+      )
+      // отмечаем выполнение в ПРОСМАТРИВАЕМЫЙ день (вчера / сегодня / …)
       api(`/api/habits/${id}/increment?date=${selected}`, { method: 'POST' })
         .then(async (r) => {
           const updated = await r.json()
-          setHabits((prev) => prev?.map((h) => (h.id === id ? updated : h)) ?? prev)
+          if (updated && updated.id) {
+            setHabits((prev) => prev?.map((h) => (h.id === id ? updated : h)) ?? prev)
+          }
         })
-        .catch((e) => console.error('Ошибка обновления:', e))
+        .catch((e) => {
+          console.error('Ошибка обновления:', e)
+          refreshHabits() // сетевой сбой — подтягиваем честное состояние с сервера
+        })
     },
-    [selected],
+    [selected, refreshHabits],
   )
 
   /* Уведомление-заглушка: новое мгновенно заменяет старое (без наложения) */
@@ -189,19 +197,24 @@ export default function App() {
     [habits],
   )
 
-  // Прогресс просматриваемого дня: доля закрытых привычек из запланированных
+  // Кольцо просматриваемого дня: доля суммарных ОТМЕТОК от суммарного плана
+  // (отжимания 10 + прыжки 5 → кольцо растёт 1/15, 2/15 … 15/15)
   const dayProgress = useMemo(() => {
-    const list = (habits ?? []).filter((h) => h.scheduledToday || h.current > 0)
-    if (list.length === 0) return 0
-    return list.filter((h) => h.status === 'done').length / list.length
+    const rel = (habits ?? []).filter((h) => h.scheduledToday || h.current > 0)
+    const total = rel.reduce((s, h) => s + h.target, 0)
+    if (total === 0) return 0
+    const done = rel.reduce((s, h) => s + Math.min(h.current, h.target), 0)
+    return done / total
   }, [habits])
 
-  // Кольцо категории: та же доля, но внутри одной категории
+  // Кольцо категории: та же доля, но внутри одной категории (сумма отметок)
   const categoryProgress = useCallback(
     (items) => {
       const rel = items.filter((h) => h.scheduledToday || h.current > 0)
-      if (rel.length === 0) return 0
-      return rel.filter((h) => h.status === 'done').length / rel.length
+      const total = rel.reduce((s, h) => s + h.target, 0)
+      if (total === 0) return 0
+      const done = rel.reduce((s, h) => s + Math.min(h.current, h.target), 0)
+      return done / total
     },
     [],
   )

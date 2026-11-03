@@ -17,9 +17,9 @@ export function toISO(d) {
 
 /**
  * Календарь-скроллер дней: две недели назад … завтра.
- * Выбранный день — фиолетовая «пилюля»: код дня недели сверху, внутри белый
- * кружок с числом и кольцо прогресса, которое закрывается по мере закрытия
- * привычек за день (от пустого кольца до полного круга).
+ * Выбранный день — фиолетовая «пилюля» (одной высоты с остальными днями):
+ * код дня недели сверху, внутри белый кружок с числом и кольцо прогресса,
+ * которое закрывается по мере суммарных отметок за день (1/15 … 15/15).
  * Клик по дню выбирает его — экран перезагружает привычки за выбранную дату.
  */
 export default function WeekStrip({ activePct = 0, habitDays = [], selected, onSelect }) {
@@ -56,7 +56,7 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, onS
   return (
     <div
       ref={scrollerRef}
-      className="week-strip no-scrollbar flex justify-start items-end gap-1.5 mt-5 select-none overflow-x-auto"
+      className="week-strip no-scrollbar flex justify-start items-center gap-1.5 mt-5 select-none overflow-x-auto"
     >
       {days.map(({ iso, code, num, isSelected }) => {
         if (isSelected) {
@@ -67,18 +67,18 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, onS
               data-selected="true"
               onClick={() => onSelect?.(iso)}
               aria-label={`${code}, ${num}`}
-              className="today-card flex-shrink-0 flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
+              className="day-pill flex-shrink-0 flex flex-col items-center justify-center gap-1 rounded-full bg-[#6d63f0] shadow-lg shadow-indigo-500/25"
             >
-              <span className="text-[13px] font-extrabold text-white">{code}</span>
+              <span className="text-[12px] font-extrabold text-white leading-none">{code}</span>
               <ProgressRing
-                size={40}
+                size={36}
                 stroke={3}
                 trackColor="rgba(255,255,255,0.3)"
                 color="#ffffff"
                 value={activePct}
               >
-                <span className="w-9 h-9 rounded-full bg-white flex items-center justify-center">
-                  <span className="text-[15px] font-extrabold text-[#232342]">{num}</span>
+                <span className="w-[30px] h-[30px] rounded-full bg-white flex items-center justify-center">
+                  <span className="text-[13px] font-extrabold text-[#232342]">{num}</span>
                 </span>
               </ProgressRing>
             </button>
@@ -100,7 +100,7 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, onS
             </span>
             <div
               className={`day-circle h-9 w-9 rounded-full flex items-center justify-center ${
-                scheduled ? 'bg-[#181928] border border-[#272848]' : 'bg-transparent'
+                scheduled ? 'bg-[#181928]' : 'bg-transparent'
               }`}
             >
               <span className="text-[14px] font-extrabold text-white/80">{num}</span>

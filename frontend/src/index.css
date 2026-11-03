@@ -25,6 +25,13 @@ body {
   scrollbar-width: none;
 }
 
+/* пилюля выбранного дня: той же высоты, что и остальные дни клетки ленты
+   (код дня + кружок), скругление полными полукругами сверху и снизу */
+.day-pill {
+  width: 4.5rem;
+  height: 3.5rem;
+}
+
 /* индикатор набора текста ассистентом */
 @keyframes typing {
   0%,
@@ -95,9 +102,9 @@ body {
   .week-strip {
     margin-top: 0.75rem;
   }
-  .today-card {
-    width: 4.25rem;
-    height: 5.25rem;
+  .day-pill {
+    width: 4.75rem;
+    height: 3.5rem;
   }
   .day-cell {
     width: 2.25rem;
