@@ -1,9 +1,7 @@
 import { useEffect, useRef } from 'react'
+import ProgressRing from './ProgressRing.jsx'
 
 const WEEKDAY_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
-
-// длина окружности кольца (r = 18)
-const RING_CIRC = 2 * Math.PI * 18
 
 function shiftDay(base, offset) {
   const d = new Date(base)
@@ -19,13 +17,15 @@ export function toISO(d) {
 
 /**
  * Календарь-скроллер дней: две недели назад … завтра.
- * Клик по дню выбирает его — экран перезагружает привычки за выбранную дату
- * (вчера / сегодня / завтра и далее по ленте). Выбранный день автоподкручивается.
- * activePct — доля закрытых привычек за выбранный день (кольцо).
+ * Выбранный день — фиолетовая «пилюля»: код дня недели сверху, внутри белый
+ * кружок с числом и кольцо прогресса, которое закрывается по мере закрытия
+ * привычек за день (от пустого кольца до полного круга).
+ * Клик по дню выбирает его — экран перезагружает привычки за выбранную дату.
  */
-export default function WeekStrip({ activePct = 0, habitDays = [], selected, todayISO, onSelect }) {
+export default function WeekStrip({ activePct = 0, habitDays = [], selected, onSelect }) {
   const scrollerRef = useRef(null)
   const today = new Date()
+  const todayISO = toISO(today)
   const days = []
 
   for (let offset = -13; offset <= 1; offset++) {
@@ -35,7 +35,6 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, tod
       iso,
       code: WEEKDAY_RU[d.getDay()],
       num: d.getDate(),
-      isToday: iso === todayISO,
       isSelected: iso === selected,
     })
   }
@@ -50,7 +49,7 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, tod
         behavior: 'smooth',
       })
     }
-  }, [selected, todayISO])
+  }, [selected])
 
   const scheduledSet = new Set(habitDays)
 
@@ -59,56 +58,8 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, tod
       ref={scrollerRef}
       className="week-strip no-scrollbar flex justify-start items-end gap-1.5 mt-5 select-none overflow-x-auto"
     >
-      {days.map(({ iso, code, num, isToday, isSelected }) => {
-        if (isToday) {
-          const active = isSelected
-          return (
-            <button
-              key={iso}
-              type="button"
-              data-selected={active}
-              onClick={() => onSelect?.(iso)}
-              aria-label={`Сегодня, ${num}`}
-              className={`today-card flex-shrink-0 flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] py-3 shadow-lg transition ${
-                active
-                  ? 'bg-[#6d63f0] shadow-indigo-500/25'
-                  : 'bg-[#26263a] shadow-black/20'
-              }`}
-            >
-              <span className="text-[13px] font-extrabold text-white">{code}</span>
-              <div className="relative w-9 h-9 flex items-center justify-center">
-                <svg viewBox="0 0 40 40" className="absolute inset-0 -rotate-90">
-                  {/* прогресс вокруг белого круга */}
-                  <circle
-                    cx="20"
-                    cy="20"
-                    r="18"
-                    fill="none"
-                    stroke="rgba(255,255,255,0.35)"
-                    strokeWidth="2.5"
-                  />
-                  <circle
-                    cx="20"
-                    cy="20"
-                    r="18"
-                    fill="none"
-                    stroke={active ? '#ffffff' : '#8f85ff'}
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeDasharray={`${activePct * RING_CIRC} ${RING_CIRC}`}
-                  />
-                </svg>
-                <span className="text-[15px] font-extrabold text-white">{num}</span>
-              </div>
-            </button>
-          )
-        }
-
-        const scheduled = scheduledSet.has(code)
-        const active = isSelected
-
-        if (active) {
-          // выбранный (не сегодняшний) день — залит тем же фиолетовым
+      {days.map(({ iso, code, num, isSelected }) => {
+        if (isSelected) {
           return (
             <button
               key={iso}
@@ -116,15 +67,25 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, tod
               data-selected="true"
               onClick={() => onSelect?.(iso)}
               aria-label={`${code}, ${num}`}
-              className="day-cell flex-shrink-0 flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
+              className="today-card flex-shrink-0 flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
             >
-              <span className="text-[13px] font-bold text-white/70">{code}</span>
-              <div className="day-circle w-9 h-9 rounded-full bg-[#6d63f0] flex items-center justify-center">
-                <span className="text-[14px] font-extrabold text-white">{num}</span>
-              </div>
+              <span className="text-[13px] font-extrabold text-white">{code}</span>
+              <ProgressRing
+                size={40}
+                stroke={3}
+                trackColor="rgba(255,255,255,0.3)"
+                color="#ffffff"
+                value={activePct}
+              >
+                <span className="w-9 h-9 rounded-full bg-white flex items-center justify-center">
+                  <span className="text-[15px] font-extrabold text-[#232342]">{num}</span>
+                </span>
+              </ProgressRing>
             </button>
           )
         }
+
+        const scheduled = scheduledSet.has(code)
 
         return (
           <button

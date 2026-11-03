@@ -1,43 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Menu,
-  ChevronUp,
-  Feather,
-  MessageCircle,
-} from 'lucide-react'
+import { ChevronUp, Feather } from 'lucide-react'
 import WeekStrip, { toISO } from './components/WeekStrip.jsx'
 import HabitCard from './components/HabitCard.jsx'
 import ChatModal from './components/ChatModal.jsx'
+import ProgressRing from './components/ProgressRing.jsx'
 import useLongPress from './components/useLongPress.js'
 import api from './api.js'
 
 // Тематика категорий (по макету): цвет рамки + цвет кружка-шеврона
 const CATEGORY_META = {
-  Спорт: { emoji: '🏋️', border: '#7e2231', circleBg: '#3a1218', icon: '#ff6b60' },
-  Саморазвитие: { emoji: '🧠', border: '#8e2c55', circleBg: '#e5a8c6', icon: '#ffffff' },
-  Здоровье: { emoji: '💊', border: '#2e6b4a', circleBg: '#16332a', icon: '#6ee7a8' },
-  Учеба: { emoji: '🎓', border: '#8a6420', circleBg: '#3a2a10', icon: '#ffd166' },
-  Работа: { emoji: '💼', border: '#2f5a8f', circleBg: '#12253c', icon: '#7cc0ff' },
-  Дом: { emoji: '🏠', border: '#5c4396', circleBg: '#221b3c', icon: '#c4b2ff' },
+  Спорт: { border: '#7e2231', circleBg: '#3a1218', icon: '#ff6b60' },
+  Саморазвитие: { border: '#8e2c55', circleBg: '#e5a8c6', icon: '#ffffff' },
+  Здоровье: { border: '#2e6b4a', circleBg: '#16332a', icon: '#6ee7a8' },
+  Учеба: { border: '#8a6420', circleBg: '#3a2a10', icon: '#ffd166' },
+  Работа: { border: '#2f5a8f', circleBg: '#12253c', icon: '#7cc0ff' },
+  Дом: { border: '#5c4396', circleBg: '#221b3c', icon: '#c4b2ff' },
 }
-const DEFAULT_META = { emoji: '✨', border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
+const DEFAULT_META = { border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
 
 const WEEKDAY_TITLE = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+const MONTHS_GEN = [
+  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+]
 
 /** Карточка одной категории: удержание → окно удаления категории. */
 function CategorySection({
   name,
   items,
   collapsed,
+  progress = 0,
   onToggle,
   onIncrement,
   onHabitLongPress,
   onCategoryLongPress,
 }) {
-  const meta = CATEGORY_META[name] ?? {
-    ...DEFAULT_META,
-    emoji: items[0]?.emoji || DEFAULT_META.emoji,
-  }
+  const meta = CATEGORY_META[name] ?? DEFAULT_META
   const longPress = useLongPress(() => onCategoryLongPress(name))
 
   return (
@@ -48,7 +46,6 @@ function CategorySection({
     >
       <div className="flex justify-between items-center px-1 pt-0.5">
         <div className="flex items-center gap-2.5">
-          <span className="text-[19px]">{meta.emoji}</span>
           <h2 className="text-[21px] font-extrabold">{name}</h2>
         </div>
         <button
@@ -57,12 +54,15 @@ function CategorySection({
           className="w-11 h-11 rounded-full flex items-center justify-center transition-transform active:scale-90"
           style={{ background: meta.circleBg }}
         >
-          <ChevronUp
-            size={18}
-            strokeWidth={3}
-            style={{ color: meta.icon }}
-            className={`transition-transform duration-200 ${collapsed ? 'rotate-180' : ''}`}
-          />
+          {/* кольцо категории: закрывается по мере закрытия привычек категории */}
+          <ProgressRing size={44} stroke={3} trackColor="rgba(255,255,255,0.16)" color={meta.icon} value={progress}>
+            <ChevronUp
+              size={18}
+              strokeWidth={3}
+              style={{ color: meta.icon }}
+              className={`transition-transform duration-200 ${collapsed ? 'rotate-180' : ''}`}
+            />
+          </ProgressRing>
         </button>
       </div>
 
@@ -196,18 +196,27 @@ export default function App() {
     return list.filter((h) => h.status === 'done').length / list.length
   }, [habits])
 
+  // Кольцо категории: та же доля, но внутри одной категории
+  const categoryProgress = useCallback(
+    (items) => {
+      const rel = items.filter((h) => h.scheduledToday || h.current > 0)
+      if (rel.length === 0) return 0
+      return rel.filter((h) => h.status === 'done').length / rel.length
+    },
+    [],
+  )
+
   // Завтра и позже — просмотр плана без отметок (выполненного ещё не было)
   const canMark = selected <= todayISO
 
-  // Заголовок в шапке: сегодня / вчера / завтра / «Пт, 24.10»
+  // Заголовок в шапке: сегодня / вчера / завтра / «5 августа»
   const title = useMemo(() => {
     if (selected === todayISO) return 'Сегодня'
     const d = new Date(`${selected}T00:00:00`)
     const diff = Math.round((d - new Date(`${todayISO}T00:00:00`)) / 86400000)
     if (diff === 1) return 'Завтра'
     if (diff === -1) return 'Вчера'
-    const p = (n) => String(n).padStart(2, '0')
-    return `${WEEKDAY_TITLE[d.getDay()]}, ${p(d.getDate())}.${p(d.getMonth() + 1)}`
+    return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`
   }, [selected, todayISO])
 
   const toggleCategory = (name) =>
@@ -219,27 +228,11 @@ export default function App() {
     // pt-env: контент не заезжает под статус-бар (зарядка/wifi) в PWA-режиме
     <div className="h-full min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
       <div className="phone-col relative w-full max-w-md px-4 flex flex-col h-full min-h-dvh pt-[env(safe-area-inset-top)]">
-        {/* Шапка: заголовок центрируется по всему экрану (не между кнопками) */}
-        <header className="app-header relative flex justify-between items-center mt-4">
-          <button
-            onClick={() => pulseToast()}
-            aria-label="Меню"
-            className="bg-[#1a1a24] border border-white/5 p-3 rounded-full text-white transition cursor-pointer hover:bg-[#15151e] active:bg-[#0e0e14]"
-          >
-            <Menu size={22} />
-          </button>
-          <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
-            <h1 className="text-[19px] font-extrabold tracking-wide whitespace-nowrap">
-              {title}
-            </h1>
-          </div>
-          <button
-            onClick={() => setChatOpen(true)}
-            aria-label="Открыть дневник с ассистентом"
-            className="bg-[#1a1a24] border border-white/5 p-3 rounded-full text-[#8f85ff] transition cursor-pointer hover:bg-[#15151e] active:bg-[#0e0e14] shadow-lg shadow-indigo-500/10"
-          >
-            <MessageCircle size={22} />
-          </button>
+        {/* Шапка: только центрированный заголовок выбранного дня */}
+        <header className="app-header relative flex justify-center items-center mt-4 h-12">
+          <h1 className="text-[19px] font-extrabold tracking-wide whitespace-nowrap">
+            {title}
+          </h1>
         </header>
 
         {/* Лента-скроллер дней: клик → привычки за выбранную дату */}
@@ -260,6 +253,7 @@ export default function App() {
               name={name}
               items={items}
               collapsed={!!collapsed[name]}
+              progress={categoryProgress(items)}
               onToggle={toggleCategory}
               onIncrement={handleIncrement}
               onHabitLongPress={(habit, isLast) =>

@@ -285,7 +285,17 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
     window = _frozen_window(row)
     _, freeze_end = window
     frozen = bool(freeze_end and freeze_end >= day)
-    scheduled_today = (_weekday_ru(day) in days) and not frozen
+    try:
+        created = date.fromisoformat(row["created_at"])
+    except (ValueError, TypeError):
+        created = None
+    # привычка существует только с даты создания и позже: задним числом
+    # она не «запланирована» и не числится пропущенной
+    scheduled_today = (
+        (_weekday_ru(day) in days)
+        and not frozen
+        and (created is None or day >= created)
+    )
     done = row["target"] > 0 and current >= row["target"]
     status = (
         "frozen" if frozen
@@ -300,7 +310,7 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
         f"{label}, {current}/{row['target']} {plural_count(row['target'], row['unit'])}"
     )
     if frozen:
-        schedule_text = f"❄️ пауза до {freeze_end.strftime('%d.%m')}, {label}, {current}/{row['target']}"
+        schedule_text = f"пауза до {freeze_end.strftime('%d.%m')}, {label}, {current}/{row['target']}"
     return {
         "id": row["id"],
         "title": row["title"],
@@ -381,7 +391,7 @@ def add_habit(
             (
                 title,
                 (category or "Другое").strip() or "Другое",
-                (emoji or "").strip(),
+                "",  # эмодзи убраны из продукта: храним всегда пусто
                 json.dumps(valid_days),
                 max(1, int(target or 1)),
                 unit,

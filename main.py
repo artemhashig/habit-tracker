@@ -267,7 +267,7 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                     "type": "freeze_habit",
                     "habit_id": updated["id"],
                     "text": (
-                        f"❄️ «{updated['title']}» на паузе до {until} — "
+                        f"«{updated['title']}» на паузе до {until} — "
                         "прогресс и серия сохранены, дни заморозки не считаются пропущенными"
                     ),
                 })
@@ -291,7 +291,7 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                 applied.append({
                     "type": "set_checkpoint",
                     "text": (
-                        f"⏳ Контрольная точка через {days} дн. — вернусь со сравнением "
+                        f"Контрольная точка через {days} дн. — вернусь со сравнением "
                         f"статистики (сейчас: {info['pct'] if info['pct'] is not None else '—'}%)"
                     ),
                 })

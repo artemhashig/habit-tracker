@@ -1,109 +1,98 @@
 import { Check, Plus, Flame } from 'lucide-react'
+import ProgressRing from './ProgressRing.jsx'
 import useLongPress from './useLongPress.js'
 
-const MINUS = '\u2212' // типографский минус как на макете
-
 /**
- * Карточка привычки.
- *  - status 'done'   → зелёная, кнопка-галочка, бейдж серии 🔥
- *  - scheduledToday  → жёлтая («отстаём»), бейдж −N, кнопка «+»
- *  - иначе           → нейтральная серая (привычка по другому графику)
- *  Удержание карточки → onLongPress (окно удаления).
- *  disabled — день в будущем (завтра и позже): просматривать можно, отмечать нельзя.
+ * Карточка привычки (по макету): база светится тускло, цвет слева направо
+ * закрашивает карточку пропорционально прогрессу дня (current/target).
+ * Ближайшая кнопка-кольцо тоже заполняется, а после закрытия «+» — галочка.
+ * Удержание карточки → onLongPress (окно удаления).
+ * disabled — день в будущем (завтра и позже): просматривать можно, отмечать нельзя.
  */
 export default function HabitCard({ habit, onIncrement, onLongPress, disabled = false }) {
   const done = habit.status === 'done'
+  const frozen = Boolean(habit.frozen)
   const scheduled = Boolean(habit.scheduledToday) || habit.current > 0
+  const pct = habit.target > 0 ? Math.min(1, (habit.current || 0) / habit.target) : 0
   const longPress = useLongPress(() => onLongPress?.())
 
-  // --- Зелёная: день закрыт ---
-  if (done) {
+  // --- Пауза: нейтральная серая, без действий ---
+  if (frozen) {
     return (
-      <div {...longPress} className="rise no-callout select-none rounded-[22px] bg-[#12c25d] p-4 flex items-start gap-3">
-        <div className="w-11 flex flex-col items-center gap-0.5">
-          {habit.streak > 0 && (
-            <div className="flex items-center gap-0.5">
-              <Flame size={15} className="text-[#ffb020] fill-[#ffb020]" />
-              <span className="text-[13px] font-extrabold text-white">{habit.streak}</span>
-            </div>
-          )}
-          <span className="text-[26px] leading-none mt-1">{habit.emoji || '✅'}</span>
-        </div>
-
-        <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5 pt-2.5">
+      <div {...longPress} className="rise no-callout select-none rounded-[22px] bg-[#1b1b26] border border-[#2b2b3c] p-4 flex items-center gap-3">
+        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
           <span className="text-[17px] font-extrabold text-white leading-tight truncate">
             {habit.title}
           </span>
-          <span className="text-[13px] font-semibold text-white/85">{habit.daysLabel}</span>
+          <span className="text-[13px] font-semibold text-white/45">{habit.scheduleText}</span>
         </div>
-
-        <button
-          onClick={() => onIncrement?.(habit.id)}
-          disabled={disabled}
-          className="mt-1 w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0 text-[#12c25d] transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
-          aria-label={`Отметить «${habit.title}»`}
-        >
-          <Check size={26} strokeWidth={3} />
-        </button>
       </div>
     )
   }
 
-  // --- Жёлтая: запланировано на сегодня, но отстаём ---
-  if (scheduled) {
-    return (
-      <div {...longPress} className="rise no-callout select-none rounded-[22px] bg-[#3e3712] p-4 flex items-start gap-3">
-        <div className="w-11 flex flex-col items-center gap-0.5">
-          {habit.deficit > 0 && (
-            <span className="text-[13px] font-extrabold text-[#ff5148]">
-              {MINUS}
-              {habit.deficit}
+  const base = scheduled ? '#2b2510' : '#1b1b26'
+  const border = scheduled ? 'transparent' : '#2b2b3c'
+  const fill = scheduled ? '#d4a20d' : '#31314a' // закрашивается слева направо
+
+  return (
+    <div
+      {...longPress}
+      className="rise no-callout select-none relative overflow-hidden rounded-[22px]"
+      style={{ background: base, border: `1px solid ${border}` }}
+    >
+      {/* заливка прогресса: от нуля (пустая база) до полного дня */}
+      {scheduled && pct > 0 && (
+        <div
+          className="absolute inset-y-0 left-0 transition-all duration-300"
+          style={{ width: `${pct * 100}%`, background: fill, borderRadius: '22px' }}
+        />
+      )}
+
+      <div className="relative flex flex-col gap-1 py-4 pl-4 pr-[4.75rem]">
+        <div className="flex items-center gap-2">
+          {habit.streak > 0 && done && (
+            <span className="flex items-center gap-0.5 flex-shrink-0">
+              <Flame size={14} className="text-white fill-white" />
+              <span className="text-[13px] font-extrabold text-white">{habit.streak}</span>
             </span>
           )}
-          <span className="text-[26px] leading-none mt-1">{habit.emoji || '🎯'}</span>
-        </div>
-
-        <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5 pt-2.5">
-          <span className="text-[17px] font-extrabold text-white leading-tight">
+          {habit.deficit > 0 && !done && (
+            <span className="text-[13px] font-extrabold text-white bg-[#b3261e] rounded-md px-1.5 flex-shrink-0">
+              −{habit.deficit}
+            </span>
+          )}
+          <span className={`flex-1 min-w-0 text-[17px] font-extrabold leading-tight truncate ${scheduled || done ? 'text-white' : 'text-white/90'}`}>
             {habit.title}
           </span>
-          <span className="text-[13px] font-semibold text-[#d8d5bd]/80">
-            {habit.scheduleText}
-          </span>
         </div>
+        <span className={`text-[13px] font-semibold ${scheduled || done ? 'text-white/90' : 'text-white/45'}`}>
+          {habit.scheduleText}
+        </span>
 
+        {/* кнопка: кольцо заполняется с привычкой, после закрытия — галочка */}
         <button
           onClick={() => onIncrement?.(habit.id)}
           disabled={disabled}
-          className="mt-1 w-14 h-14 rounded-full bg-[#4c4416] border border-[#6b6124] flex items-center justify-center flex-shrink-0 text-white transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
-          aria-label={`Добавить к «${habit.title}»`}
+          aria-label={done ? `Закрыто: «${habit.title}»` : `Добавить к «${habit.title}»`}
+          className="absolute right-3 top-1/2 -translate-y-1/2 w-14 h-14 flex items-center justify-center transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
         >
-          <Plus size={26} strokeWidth={2.5} />
+          <ProgressRing
+            size={56}
+            stroke={4}
+            trackColor="rgba(255,255,255,0.25)"
+            color="#ffffff"
+            value={pct}
+          >
+            <span className="w-[42px] h-[42px] rounded-full bg-white flex items-center justify-center">
+              {done ? (
+                <Check size={26} strokeWidth={3.2} className={scheduled ? 'text-[#d4a20d]' : 'text-[#8f85ff]'} />
+              ) : (
+                <Plus size={24} strokeWidth={2.8} className={scheduled ? 'text-[#d4a20d]' : 'text-[#26263a]'} />
+              )}
+            </span>
+          </ProgressRing>
         </button>
       </div>
-    )
-  }
-
-  // --- Нейтральная: привычка по другому графику ---
-  return (
-    <div {...longPress} className="rise no-callout select-none rounded-[22px] bg-[#1b1b26] border border-[#2b2b3c] p-4 flex items-center gap-3">
-      <span className="w-11 text-center text-[26px] leading-none">{habit.emoji || '🗓'}</span>
-
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        <span className="text-[17px] font-extrabold text-white leading-tight truncate">
-          {habit.title}
-        </span>
-        <span className="text-[13px] font-semibold text-white/45">{habit.scheduleText}</span>
-      </div>
-
-      <button
-        onClick={() => onIncrement?.(habit.id)}
-        disabled={disabled}
-        className="w-14 h-14 rounded-full bg-[#262639] border border-[#35354d] flex items-center justify-center flex-shrink-0 text-white/80 transition-transform active:scale-90 disabled:opacity-40 disabled:active:scale-100"
-        aria-label={`Отметить «${habit.title}»`}
-      >
-        <Plus size={26} strokeWidth={2.5} />
-      </button>
     </div>
   )
 }
