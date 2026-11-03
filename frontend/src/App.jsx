@@ -90,10 +90,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [assistant, setAssistant] = useState(null) // { content, actions } — карточка ответа
   const [syncNote, setSyncNote] = useState('Ожидание начала синхронизации...')
-  const [menuToast, setMenuToast] = useState(false)
+  const [toast, setToast] = useState(null) // { text, key } — уведомление «пока рано»
   const [deleteTarget, setDeleteTarget] = useState(null) // { kind: 'habit'|'category', ... }
   const [deleting, setDeleting] = useState(false)
-  const menuTimer = useRef(null)
+  const toastTimer = useRef(null)
 
   const refreshHabits = useCallback((afterSync = false) => {
     return api('/api/habits')
@@ -107,7 +107,14 @@ export default function App() {
 
   useEffect(() => {
     refreshHabits()
-    return () => clearTimeout(menuTimer.current)
+    // Safari для доступности игнорирует user-scalable=no в meta — ловим сам жест:
+    // gesturestart = начало щипка двумя пальцами; preventDefault останавливает его
+    const blockPinch = (e) => e.preventDefault()
+    document.addEventListener('gesturestart', blockPinch)
+    return () => {
+      clearTimeout(toastTimer.current)
+      document.removeEventListener('gesturestart', blockPinch)
+    }
   }, [refreshHabits])
 
   const handleIncrement = useCallback(
@@ -122,11 +129,11 @@ export default function App() {
     [],
   )
 
-  /* Кнопка слева сверху: уведомление «Пока рано» */
-  const pulseMenu = () => {
-    setMenuToast(true)
-    clearTimeout(menuTimer.current)
-    menuTimer.current = setTimeout(() => setMenuToast(false), 1900)
+  /* Уведомление-заглушка: новое мгновенно заменяет старое (без наложения) */
+  const pulseToast = (text = 'Пока рано') => {
+    clearTimeout(toastTimer.current)
+    setToast({ text, key: Date.now() })
+    toastTimer.current = setTimeout(() => setToast(null), 1900)
   }
 
   /* Удаление (диалог по удержанию) */
@@ -217,16 +224,21 @@ export default function App() {
     // pt-env: контент не заезжает под статус-бар (зарядка/wifi) в PWA-режиме
     <div className="h-full min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
       <div className="relative w-full max-w-md px-4 flex flex-col h-full min-h-dvh pt-[env(safe-area-inset-top)]">
-        {/* Шапка */}
-        <header className="flex justify-between items-center mt-4">
+        {/* Шапка: заголовок центрируется по всему экрану (не между кнопками) */}
+        <header className="relative flex justify-between items-center mt-4">
           <button
-            onClick={pulseMenu}
+            onClick={() => pulseToast()}
             aria-label="Меню"
             className="bg-[#1a1a24] border border-white/5 p-3 rounded-full text-white transition cursor-pointer hover:bg-[#15151e] active:bg-[#0e0e14]"
           >
             <Menu size={22} />
           </button>
-          <h1 className="text-[19px] font-extrabold tracking-wide">Сегодня</h1>
+          <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 pointer-events-none">
+            {/* будущие экраны просто передадут другой текст («Завтра», дата…) */}
+            <h1 className="text-[19px] font-extrabold tracking-wide whitespace-nowrap">
+              Сегодня
+            </h1>
+          </div>
           <button
             onClick={() => setCreateOpen(true)}
             aria-label="Создать привычку"
@@ -238,7 +250,11 @@ export default function App() {
         </header>
 
         {/* Лента дней */}
-        <WeekStrip activePct={dayProgress} habitDays={habitDays} />
+        <WeekStrip
+          activePct={dayProgress}
+          habitDays={habitDays}
+          onDayClick={() => pulseToast()}
+        />
 
         {/* Карточки категорий */}
         <main className="flex flex-col gap-5 mt-6 pb-36">
@@ -287,7 +303,7 @@ export default function App() {
 
         {/* Нижняя строка ввода (как в мессенджере) + карточка ответа ассистента */}
         <div className="fixed bottom-0 inset-x-0 z-40 flex justify-center pointer-events-none">
-          <div className="w-full max-w-md px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pointer-events-auto flex flex-col gap-2">
+          <div className="w-full max-w-md px-4 pt-2 pb-2 pointer-events-auto flex flex-col gap-2">
             {assistant && (
               <div className="rise relative rounded-[22px] bg-[#17171f] border border-white/10 px-4 pt-3 pb-3.5 shadow-2xl shadow-black/50">
                 <button
@@ -357,10 +373,13 @@ export default function App() {
           </div>
         </div>
 
-        {/* Уведомление «пока рано» (кнопка меню) */}
-        {menuToast && (
-          <div className="rise fixed top-20 left-1/2 -translate-x-1/2 z-[70] bg-[#1a1a24] border border-white/10 rounded-full px-5 py-2.5 text-[14px] font-bold text-white/90 shadow-xl pointer-events-none whitespace-nowrap">
-            Пока рано
+        {/* Уведомление-заглушка (кнопки меню / дней недели): новое заменяет старое */}
+        {toast && (
+          <div
+            key={toast.key}
+            className="rise fixed top-[calc(6.25rem+env(safe-area-inset-top))] left-1/2 -translate-x-1/2 z-[70] bg-[#1a1a24] border border-white/10 rounded-full px-5 py-2.5 text-[14px] font-bold text-white/90 shadow-xl pointer-events-none whitespace-nowrap"
+          >
+            {toast.text}
           </div>
         )}
 

@@ -13,8 +13,9 @@ function shiftDay(base, offset) {
  * Лента «неделя»: 6 дней до сегодня + завтра.
  * activePct — доля закрытых на сегодня привычек (кольцо прогресса).
  * habitDays — дни недели, на которые хоть что-то запланировано.
+ * onDayClick — клик по любому дню, кроме «сегодня» (пока заглушка «Пока рано»).
  */
-export default function WeekStrip({ activePct = 0, habitDays = [] }) {
+export default function WeekStrip({ activePct = 0, habitDays = [], onDayClick }) {
   const today = new Date()
   const days = []
 
@@ -70,22 +71,33 @@ export default function WeekStrip({ activePct = 0, habitDays = [] }) {
         const scheduled = scheduledSet.has(code)
         if (scheduled) {
           return (
-            <div key={i} className="flex flex-col items-center gap-1 w-9">
+            <button
+              key={i}
+              type="button"
+              onClick={() => onDayClick?.(code, num)}
+              aria-label={`${code}, ${num}`}
+              className="flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
+            >
               <span className="text-[13px] font-bold text-white/60">{code}</span>
               <div className="w-9 h-9 rounded-full bg-[#181928] border border-[#272848] flex items-center justify-center">
                 <span className="text-[14px] font-extrabold text-white">{num}</span>
               </div>
-            </div>
+            </button>
           )
         }
 
         return (
-          <div key={i} className="flex flex-col items-center gap-1 w-9">
+          <button
+            key={i}
+            type="button"
+            onClick={() => onDayClick?.(code, num)}
+            className="flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
+          >
             <span className="text-[13px] font-bold text-white/35">{code}</span>
             <span className="h-9 flex items-center text-[14px] font-extrabold text-white/60">
               {num}
             </span>
-          </div>
+          </button>
         )
       })}
     </div>
