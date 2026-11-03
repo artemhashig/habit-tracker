@@ -81,3 +81,34 @@ body {
   overflow-x: clip;
   background: #000; /* за пределами «телефона» не белеет при отскоке */
 }
+
+/* Альбомная ориентация телефона: колонка делается шире (пустые полости по бокам
+   исчезают), лента дней и отступы компактнее — контент влезает без листания.
+   На десктопе и в портрете (высота > 520px) не действует. */
+@media (orientation: landscape) and (max-height: 520px) {
+  .phone-col {
+    max-width: 44rem;
+  }
+  .app-header {
+    margin-top: 0.75rem;
+  }
+  .week-strip {
+    margin-top: 0.75rem;
+  }
+  .today-card {
+    width: 4.25rem;
+    height: 5.25rem;
+  }
+  .day-cell {
+    width: 2.25rem;
+  }
+  .day-circle {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+  .app-main {
+    margin-top: 1.25rem;
+    gap: 0.75rem;
+    padding-bottom: 4.5rem; /* под фиксированную нижнюю панель ввода */
+  }
+}

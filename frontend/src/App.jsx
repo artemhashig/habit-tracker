@@ -223,9 +223,9 @@ export default function App() {
     // где dvh не поддерживается (иначе в PWA снизу остаётся пустое место);
     // pt-env: контент не заезжает под статус-бар (зарядка/wifi) в PWA-режиме
     <div className="h-full min-h-dvh bg-black text-white flex justify-center font-sans antialiased overflow-x-clip">
-      <div className="relative w-full max-w-md px-4 flex flex-col h-full min-h-dvh pt-[env(safe-area-inset-top)]">
+      <div className="phone-col relative w-full max-w-md px-4 flex flex-col h-full min-h-dvh pt-[env(safe-area-inset-top)]">
         {/* Шапка: заголовок центрируется по всему экрану (не между кнопками) */}
-        <header className="relative flex justify-between items-center mt-4">
+        <header className="app-header relative flex justify-between items-center mt-4">
           <button
             onClick={() => pulseToast()}
             aria-label="Меню"
@@ -257,7 +257,7 @@ export default function App() {
         />
 
         {/* Карточки категорий */}
-        <main className="flex flex-col gap-5 mt-6 pb-36">
+        <main className="app-main flex flex-col gap-5 mt-6 pb-36">
           {/* pb: запас под фиксированную нижнюю панель ввода, чтобы карточки не прятались */}
           {groups.map(({ name, items }) => (
             <CategorySection
@@ -303,7 +303,7 @@ export default function App() {
 
         {/* Нижняя строка ввода (как в мессенджере) + карточка ответа ассистента */}
         <div className="fixed bottom-0 inset-x-0 z-40 flex justify-center pointer-events-none">
-          <div className="w-full max-w-md px-4 pt-2 pb-2 pointer-events-auto flex flex-col gap-2">
+          <div className="phone-col w-full max-w-md px-4 pt-2 pb-2 pointer-events-auto flex flex-col gap-2">
             {assistant && (
               <div className="rise relative rounded-[22px] bg-[#17171f] border border-white/10 px-4 pt-3 pb-3.5 shadow-2xl shadow-black/50">
                 <button

@@ -31,13 +31,13 @@ export default function WeekStrip({ activePct = 0, habitDays = [], onDayClick })
   const scheduledSet = new Set(habitDays)
 
   return (
-    <div className="flex justify-between items-end px-0.5 mt-5 select-none">
+    <div className="week-strip flex justify-between items-end px-0.5 mt-5 select-none">
       {days.map(({ code, num, isToday }, i) => {
         if (isToday) {
           return (
             <div
               key={i}
-              className="flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
+              className="today-card flex flex-col items-center justify-between w-16 h-[6.5rem] rounded-[26px] bg-[#6d63f0] py-3 shadow-lg shadow-indigo-500/25"
             >
               <span className="text-[13px] font-extrabold text-white">{code}</span>
               <div className="relative w-9 h-9 flex items-center justify-center">
@@ -76,10 +76,10 @@ export default function WeekStrip({ activePct = 0, habitDays = [], onDayClick })
               type="button"
               onClick={() => onDayClick?.(code, num)}
               aria-label={`${code}, ${num}`}
-              className="flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
+              className="day-cell flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
             >
               <span className="text-[13px] font-bold text-white/60">{code}</span>
-              <div className="w-9 h-9 rounded-full bg-[#181928] border border-[#272848] flex items-center justify-center">
+              <div className="day-circle w-9 h-9 rounded-full bg-[#181928] border border-[#272848] flex items-center justify-center">
                 <span className="text-[14px] font-extrabold text-white">{num}</span>
               </div>
             </button>
@@ -91,10 +91,10 @@ export default function WeekStrip({ activePct = 0, habitDays = [], onDayClick })
             key={i}
             type="button"
             onClick={() => onDayClick?.(code, num)}
-            className="flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
+            className="day-cell flex flex-col items-center gap-1 w-9 transition-transform active:scale-90"
           >
             <span className="text-[13px] font-bold text-white/35">{code}</span>
-            <span className="h-9 flex items-center text-[14px] font-extrabold text-white/60">
+            <span className="day-circle h-9 flex items-center text-[14px] font-extrabold text-white/60">
               {num}
             </span>
           </button>
