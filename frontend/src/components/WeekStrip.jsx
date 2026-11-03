@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react'
-import ProgressRing from './ProgressRing.jsx'
 
 const WEEKDAY_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
 
@@ -18,11 +17,10 @@ export function toISO(d) {
 /**
  * Календарь-скроллер дней: две недели назад … завтра.
  * Выбранный день — фиолетовая «пилюля» (одной высоты с остальными днями):
- * код дня недели сверху, внутри белый кружок с числом и кольцо прогресса,
- * которое закрывается по мере суммарных отметок за день (1/15 … 15/15).
+ * код дня недели сверху, под ним белый кружок с числом (как на макете).
  * Клик по дню выбирает его — экран перезагружает привычки за выбранную дату.
  */
-export default function WeekStrip({ activePct = 0, habitDays = [], selected, onSelect }) {
+export default function WeekStrip({ habitDays = [], selected, onSelect }) {
   const scrollerRef = useRef(null)
   const today = new Date()
   const todayISO = toISO(today)
@@ -67,20 +65,12 @@ export default function WeekStrip({ activePct = 0, habitDays = [], selected, onS
               data-selected="true"
               onClick={() => onSelect?.(iso)}
               aria-label={`${code}, ${num}`}
-              className="day-pill flex-shrink-0 flex flex-col items-center justify-center gap-1 rounded-full bg-[#6d63f0] shadow-lg shadow-indigo-500/25"
+              className="day-pill flex-shrink-0 flex flex-col items-center justify-center gap-1.5 rounded-full bg-[#6d63f0] shadow-lg shadow-indigo-500/25"
             >
-              <span className="text-[12px] font-extrabold text-white leading-none">{code}</span>
-              <ProgressRing
-                size={36}
-                stroke={3}
-                trackColor="rgba(255,255,255,0.3)"
-                color="#ffffff"
-                value={activePct}
-              >
-                <span className="w-[30px] h-[30px] rounded-full bg-white flex items-center justify-center">
-                  <span className="text-[13px] font-extrabold text-[#232342]">{num}</span>
-                </span>
-              </ProgressRing>
+              <span className="text-[13px] font-extrabold text-white leading-none">{code}</span>
+              <span className="w-9 h-9 rounded-full bg-white flex items-center justify-center">
+                <span className="text-[15px] font-extrabold text-[#232342] leading-none">{num}</span>
+              </span>
             </button>
           )
         }

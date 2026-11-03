@@ -18,6 +18,9 @@ const CATEGORY_META = {
 }
 const DEFAULT_META = { border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
 
+// Коды дня недели для JS getDay() (0 = воскресенье)
+const WEEKDAY_RU_STRIP = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+
 const MONTHS_GEN = [
   'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
   'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
@@ -88,24 +91,17 @@ export default function App() {
   const [collapsed, setCollapsed] = useState({}) // { [категория]: true }
   const [chatOpen, setChatOpen] = useState(false) // единственное окно дневника
   const [pendingReply, setPendingReply] = useState(null) // проактивный ре-анализ
-  const [syncNote, setSyncNote] = useState('Ожидание начала синхронизации...')
   const [toast, setToast] = useState(null) // { text, key } — уведомление
   const [deleteTarget, setDeleteTarget] = useState(null) // { kind: 'habit'|'category', ... }
   const [deleting, setDeleting] = useState(false)
   const toastTimer = useRef(null)
 
-  const refreshHabits = useCallback(
-    (afterSync = false) => {
-      return api(`/api/habits?date=${selected}`)
-        .then((r) => r.json())
-        .then((data) => {
-          setHabits(data)
-          if (Array.isArray(data) && afterSync) setSyncNote('Синхронизация завершена ✓')
-        })
-        .catch((e) => console.error('Ошибка загрузки:', e))
-    },
-    [selected],
-  )
+  const refreshHabits = useCallback(() => {
+    return api(`/api/habits?date=${selected}`)
+      .then((r) => r.json())
+      .then((data) => setHabits(data))
+      .catch((e) => console.error('Ошибка загрузки:', e))
+  }, [selected])
 
   useEffect(() => {
     refreshHabits()
@@ -172,7 +168,7 @@ export default function App() {
       const r = await api(url, { method: 'DELETE' })
       if (!r.ok) throw new Error('bad response')
       setDeleteTarget(null)
-      await refreshHabits(true)
+      await refreshHabits()
     } catch {
       pulseToast('Не получилось удалить')
     } finally {
@@ -180,16 +176,25 @@ export default function App() {
     }
   }
 
-  // Группировка по категориям (порядок как в БД)
+  // День просматриваемой даты (код недели) — чтобы скрыть не-свои привычки
+  const viewWeekday = useMemo(
+    () => WEEKDAY_RU_STRIP[new Date(`${selected}T00:00:00`).getDay()],
+    [selected],
+  )
+
+  // Группировка по категориям (порядок как в БД): на день показываем только
+  // привычки этого дня (запланированы, закрыты в нём или на паузе в свой день)
   const groups = useMemo(() => {
     if (!Array.isArray(habits)) return []
     const acc = new Map()
     for (const h of habits) {
+      const onSchedule = (h.days ?? []).includes(viewWeekday)
+      if (!(h.scheduledToday || h.current > 0 || (h.frozen && onSchedule))) continue
       if (!acc.has(h.category)) acc.set(h.category, [])
       acc.get(h.category).push(h)
     }
     return [...acc.entries()].map(([name, items]) => ({ name, items }))
-  }, [habits])
+  }, [habits, viewWeekday])
 
   // Дни недели, на которые что-то запланировано (для кружков в ленте)
   const habitDays = useMemo(
@@ -197,17 +202,8 @@ export default function App() {
     [habits],
   )
 
-  // Кольцо просматриваемого дня: доля суммарных ОТМЕТОК от суммарного плана
+  // Кольцо категории: доля суммарных отметок от суммарного плана
   // (отжимания 10 + прыжки 5 → кольцо растёт 1/15, 2/15 … 15/15)
-  const dayProgress = useMemo(() => {
-    const rel = (habits ?? []).filter((h) => h.scheduledToday || h.current > 0)
-    const total = rel.reduce((s, h) => s + h.target, 0)
-    if (total === 0) return 0
-    const done = rel.reduce((s, h) => s + Math.min(h.current, h.target), 0)
-    return done / total
-  }, [habits])
-
-  // Кольцо категории: та же доля, но внутри одной категории (сумма отметок)
   const categoryProgress = useCallback(
     (items) => {
       const rel = items.filter((h) => h.scheduledToday || h.current > 0)
@@ -250,7 +246,6 @@ export default function App() {
 
         {/* Лента-скроллер дней: клик → привычки за выбранную дату */}
         <WeekStrip
-          activePct={dayProgress}
           habitDays={habitDays}
           selected={selected}
           todayISO={todayISO}
@@ -288,19 +283,16 @@ export default function App() {
             />
           ))}
 
-          {habits?.length === 0 && (
+          {groups.length === 0 && (
             <div className="rounded-[26px] bg-[#12121a] border border-[#2b2b3c] p-6 text-center">
-              <p className="text-[15px] font-bold text-white/80">Пока пусто</p>
+              <p className="text-[15px] font-bold text-white/80">
+                {(habits?.length ?? 0) === 0 ? 'Пока пусто' : 'На этот день ничего не запланировано'}
+              </p>
               <p className="text-[13px] text-white/45 mt-1">
                 Напиши ассистенту в поле внизу экрана — я сам создам привычки из твоих слов.
               </p>
             </div>
           )}
-
-          {/* Строка синхронизации */}
-          <p className="text-center text-[14px] font-semibold text-[#6a6a78] pb-1">
-            {syncNote}
-          </p>
         </main>
 
         {/* Нижняя строка: выглядит как поле ввода, нажатие открывает единственный дневник */}
@@ -378,7 +370,7 @@ export default function App() {
           <ChatModal
             pendingReply={pendingReply}
             onClose={() => setChatOpen(false)}
-            onHabitsChanged={() => refreshHabits(true)}
+            onHabitsChanged={() => refreshHabits()}
           />
         )}
       </div>
