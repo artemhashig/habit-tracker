@@ -372,6 +372,75 @@ check("цель = 3 раза",
       jump is not None and jump["target"] == 3 and jump["unit"] == "раз",
       str(jump and (jump["target"], jump["unit"])))
 
+print("\n=== 13. Командный чат: без заглушек, удаление, без галлюцинаций ===")
+DEV6 = {"X-Device-ID": "device-6", "Content-Type": "application/json"}
+
+# голая команда → никакой «Новой привычки», только уточняющий вопрос
+r = client.post("/api/chat", json={"message": "создай привычку"}, headers=DEV6)
+data = r.json()
+check("«создай привычку» → 200", r.status_code == 200)
+check("ничего не создано (нет add_habit)",
+      all(a["type"] != "add_habit" for a in data["applied"]), str(data["applied"]))
+check("задан уточняющий вопрос",
+      "привыч" in data["reply"].lower() and "?" in data["reply"], data["reply"])
+check("в базе пусто", client.get("/api/habits", headers=DEV6).json() == [])
+
+# короткие триггеры — тоже вопрос, а не шаблон и не создание
+for msg in ("создай", "привычка"):
+    r = client.post("/api/chat", json={"message": msg}, headers=DEV6)
+    data = r.json()
+    check(f"«{msg}» → без действий",
+          all(a["type"] != "add_habit" for a in data["applied"]), str(data["applied"]))
+    check(f"«{msg}» → нет выдумок о неделе",
+          "недел" not in data["reply"].lower() and "трудн" not in data["reply"].lower(),
+          data["reply"])
+
+# удаление всех привычек через чат: реальное действие + подтверждение
+client.post("/api/habits", json={"title": "Пробежка", "target": 1}, headers=DEV6)
+client.post("/api/habits", json={"title": "Вода", "target": 2}, headers=DEV6)
+before = client.get("/api/habits", headers=DEV6).json()
+check("две привычки созданы для удаления", len(before) == 2, str([h['title'] for h in before]))
+
+r = client.post("/api/chat", json={"message": "удали все привычки"}, headers=DEV6)
+data = r.json()
+check("есть действия delete_habit",
+      sum(1 for a in data["applied"] if a["type"] == "delete_habit") == 2,
+      str(data["applied"]))
+check("в ответе подтверждение удаления",
+      "удалил" in data["reply"].lower(), data["reply"])
+left = client.get("/api/habits", headers=DEV6).json()
+check("после «удали все» в базе пусто", left == [], str(left))
+
+# одиночная привычка: «удали привычку» без названия — очевидное удаление
+client.post("/api/habits", json={"title": "Йога", "target": 1}, headers=DEV6)
+r = client.post("/api/chat", json={"message": "удали привычку"}, headers=DEV6)
+data = r.json()
+check("единственная привычка удалена без уточнения",
+      any(a["type"] == "delete_habit" for a in data["applied"]), str(data["applied"]))
+check("йоги больше нет",
+      client.get("/api/habits", headers=DEV6).json() == [])
+
+# удаление несуществующей по названию — честный отказ, ничего не тронуто
+client.post("/api/habits", json={"title": "Бассейн", "target": 1}, headers=DEV6)
+r = client.post("/api/chat", json={"message": "удали привычку сноуборд"}, headers=DEV6)
+data = r.json()
+check("несуществующую привычку удалить нельзя",
+      all(a["type"] != "delete_habit" for a in data["applied"]), str(data["applied"]))
+check("бассейн остался на месте",
+      any(h["title"] == "Бассейн" for h in client.get("/api/habits", headers=DEV6).json()))
+
+# неполное описание привычки — уточняющий вопрос, а не дефолтная планка
+r = client.post(
+    "/api/chat",
+    json={"message": "добавь привычку читать книги"},
+    headers=DEV6,
+)
+data = r.json()
+check("«читать книги» без графика → без создания",
+      all(a["type"] != "add_habit" for a in data["applied"]), str(data["applied"]))
+check("уточняются недостающие детали",
+      "по каким дням" in data["reply"] and "сколько" in data["reply"], data["reply"])
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)

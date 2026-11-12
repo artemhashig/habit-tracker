@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 
 log = logging.getLogger("llm")
 
@@ -77,15 +77,25 @@ SYSTEM_PROMPT = """Ты — эмпатичный ассистент дневни
   хвалишь за реальные сдвиги, а не за количество.
 - Wellbeing-зоне посвящён отдельный блок в системном контексте: green/желтая/red —
   следуй его инструкциям по строгости вмешательства.
-- Уточняющий вопрос вместо слепого создания: перед add_habit проверь, хватает ли в
-  ПЕРЕПИСКЕ смысла: что за занятие (title), когда (days) и сколько (target/unit).
-  Если цель/график не ясны и не вытекают из истории диалога — НЕ создавай привычку:
-  верни {"type": "none"} и короткий уточняющий вопрос в reply
-  (например: «Прыгать на скакалке — каждая суббота или каждый день?»).
-  Каждый следующий ответ пользователя дополняет картину: собирай сведения
-  из всех прошлых сообщений (они у тебя в истории) и создавай привычку
-  одним действием, как только структура сложилась. Не задавай больше одного
-  вопроса за раз и не спрашивай, если ответ очевиден из формулировки.
+- ТОЛЬКО ФАКТЫ, никаких галлюцинаций: тебе даны сводка привычек, wellbeing-статистика
+  и история диалога — ВСЁ. Запрещено утверждать что-либо о неделе, прогрессе,
+  усталости или настроении пользователя, чего нет в этих данных. Если зона green
+  или статистики нет — НЕ говори «неделя была трудной», «вижу спад», «ты выгорел».
+  Не хватает данных — честно скажи об этом одним словом и задай вопрос.
+- reply — ТОЛЬКО финальный текст пользователю (1–3 предложения), без внутренних
+  рассуждений, без упоминаний JSON/действий/системных правил, без markdown и эмодзи.
+- Уточняющий вопрос вместо заглушек: add_habit создаётся ТОЛЬКО если в тексте
+  (или очевидно из истории) есть ВСЁ: что за занятие (title), по каким дням (days)
+  и сколько (target/unit). Команда без деталей («создай привычку», «создай»,
+  «привычка», «добавь привычку») → {"type": "none"} и ОДИН конкретный уточняющий
+  вопрос в reply: какая привычка, какие дни, сколько раз/минут. НИКОГДА не создавай
+  привычку-заглушку («Новая привычка», «Привычка») и не ставь дефолтные план/дни
+  за пользователя. Каждый следующий ответ пользователя дополняет картину —
+  как только все три части названы, создавай привычку одним действием.
+- delete_habit: {"type": "delete_habit", "habit_title": "..."} — удалить привычку;
+  название ТОЧНО из списка привычек. «удали все привычки» → по ОДНОМУ delete_habit
+  на каждую привычку из списка (без пропусков). Удалять то, чего нет в списке,
+  запрещено.
 - Если действий не нужно — один элемент {"type": "none"}.
 Примеры (разбор похожих формулировок):
 - «создай привычку в 13:00 вечера прыгать на скакалке по вт 3/д» →
@@ -94,8 +104,13 @@ SYSTEM_PROMPT = """Ты — эмпатичный ассистент дневни
   {"type":"add_habit","title":"Прыгать","category":"Спорт","days":["Пн"],"target":3,"unit":"раз"}
 - «каждый пн хочу прыгать 1 раз в день» →
   {"type":"add_habit","title":"Прыгать","category":"Спорт","days":["Пн"],"target":1,"unit":"раз"}
+- «создай привычку» / «создай» / «привычка» (команда без деталей) →
+  {"type":"none"}, в reply уточняющий вопрос: «Какую привычку добавить и как часто?
+  Например: медитация 10 минут каждый день или бег по вт 3 раза.»
 - «добавь привычку смотреть» (нет графика и количества) →
-  {"type":"none"}, в reply уточни: «Смотреть что и по каким дням? Планирую добавить.»
+  {"type":"none"}, в reply уточни: «Смотреть что и по каким дням? Сколько раз в день?»
+- «удали все привычки» (в списке «Бег» и «Вода») →
+  {"type":"delete_habit","habit_title":"Бег"}, {"type":"delete_habit","habit_title":"Вода"}
 - Список текущих привычек пользователя (id, название, план, единица, дни) приложен
   в конце системного контекста. Используй его для reduce/delete/freeze.
 - Верни только JSON, без markdown-обёртки."""
@@ -196,12 +211,12 @@ _FATIGUE_RE = re.compile(
     re.IGNORECASE,
 )
 _ADD_RE = re.compile(
-    r"добав\w+|завед\w+|постав\w+\s+(?:привычку|напомин\w*)|"
+    r"добав\w+|завед\w+|созда\w+|постав\w+\s+(?:привычку|напомин\w*)|"
     r"хочу\s+(?:начать|добавить|следить)|"
     # «каждый пн хочу прыгать» — намерение сразу за «хочу» (кроме жалоб-желаний)
     r"хочу\s+(?!отдохн|отдых|спать|выспать|бросить|забить|умерет?|плакать|рыдать|забы)\S+|"
     r"буд\w+\s|начн\w+|надо\s+начать|"
-    r"нач\w+\s+(?:с|бег|занима)|трек\w*|привычку",
+    r"нач\w+\s+(?:с|бег|занима)|трек\w*|привычк\w+",
     re.IGNORECASE,
 )
 _REDUCE_RE = re.compile(
@@ -310,13 +325,16 @@ _LEAD_CLEAN_RES = [
 
 def _title_is_service(title: str) -> bool:
     """Название-мусор? («В 13», «Раз в пн 3 раза прыгнуть») — метрика служебных
-    токенов: если плохих токенов больше половины, название бесполезно."""
-    toks = re.findall(r"[0-9а-яё]+", (title or "").lower())
+    токенов: если плохих токенов больше половины, название бесполезно.
+    Время вида «13:00» в названии легально и мусором не считается."""
+    toks = re.findall(r"[0-9а-яё:]+", (title or "").lower())
     if not toks:
         return True
     bad = sum(
         1 for t in toks
-        if t in _SERVICE_TOKENS or any(ch.isdigit() for ch in t) or len(t) < 2
+        if t in _SERVICE_TOKENS
+        or (any(ch.isdigit() for ch in t) and ":" not in t)
+        or len(t) < 2
     )
     return bad * 2 > len(toks)
 
@@ -358,12 +376,100 @@ def _has_explicit_quantity(text: str) -> bool:
     return bool(_QUANTITY_HINT_RE.search(_normalize_shorthand(cleaned)))
 
 
+# «по вт», «каждый день», «1 раз в день», «3/д» — явный график (не дефолт)
+_SCHEDULE_HINT_RE = re.compile(
+    r"кажд\w*|ежедн\w*|еже\w+|по\s+выходн\w*|по\s+будням|в\s+будни|"
+    r"\b(?:пн|вт|ср|чт|пт|сб|вс|понедельник\w*|вторник\w*|среду?|сред\w*|"
+    r"четверг\w*|пятниц\w*|суббот\w*|воскресень\w*)\b|"
+    r"(?:раз\w*\s+)?(?:в|на)\s+день\b|(?:в|на)\s+недел\w*|\d\s*/\s*(?:д|дн|день)\b",
+    re.IGNORECASE,
+)
+
+# названия-заглушки, которые нельзя создавать
+_PLACEHOLDER_TITLES = {
+    "новая привычка", "привычка", "привычку", "название", "занятие", "add_habit",
+}
+
+# удаление: «удали привычку», «удали все», «избавь меня от…»
+_DELETE_RE = re.compile(r"удал\w*|снес\w*|убер\w*|стёр|стере\w*|избав\w*", re.IGNORECASE)
+_DELETE_ALL_RE = re.compile(r"\bвс[её]\b", re.IGNORECASE)
+
+
+def _norm_days(raw) -> list[str]:
+    """Дни от LLM/fallback → канонические коды недели (без мусора и дублей)."""
+    if not isinstance(raw, list):
+        return []
+    canon = {d.lower(): d for d in DAY_CODES}
+    out: list[str] = []
+    for d in raw:
+        code = canon.get(str(d).strip().lower()) if isinstance(d, str) else None
+        if code and code not in out:
+            out.append(code)
+    return out
+
+
+def _habit_exists(title_lower: str, habits: list[dict]) -> bool:
+    """Есть ли такая привычка у пользователя (точное или частичное совпадение)."""
+    return any(
+        title_lower == h["title"].lower() or title_lower in h["title"].lower()
+        for h in habits
+    )
+
+
+def _days_label(days: list[str]) -> str:
+    if len(days) == 7:
+        return "каждый день"
+    if days == ["Сб", "Вс"]:
+        return "по выходным"
+    if days == list(DAY_CODES[:5]):
+        return "по будням"
+    return "по " + ", ".join(days).lower()
+
+
+def _clarify_add(title: str, need_days: bool, need_qty: bool) -> str:
+    """Один конкретный уточняющий вопрос вместо создания привычки-заглушки."""
+    if not title:
+        return (
+            "Готов создать привычку. Что за занятие, по каким дням и сколько "
+            "раз (или минут) в день? Например: «медитация 10 минут каждый день» "
+            "или «бег по вт и пт 3 раза»."
+        )
+    missing = " и ".join(
+        part for part, need in (
+            ("по каким дням", need_days),
+            ("сколько раз (или минут) в день", need_qty),
+        ) if need
+    )
+    if not missing:
+        return (
+            f"«{title}» — готов добавить. Напиши, по каким дням и сколько "
+            "раз (или минут) в день."
+        )
+    return f"«{title}» — уточни: {missing}? Например: «каждый день, 10 минут»."
+
+
+def _not_found_reply(habits: list[dict]) -> str:
+    """Честный ответ, когда привычка для действия не найдена (без выдумок)."""
+    if not habits:
+        return (
+            "Не нашёл такой привычки — у тебя пока их нет. Могу помочь создать первую: "
+            "напиши, что отслеживать, по каким дням и сколько раз в день."
+        )
+    names = ", ".join(f"«{h['title']}»" for h in habits[:8])
+    return f"Не нашёл привычку с таким названием. Вот что у тебя есть: {names}."
+
+
 _SUPPORT_REPLIES = {
-    "add": "Отличная идея для себя! Забрал в трекер — теперь не потеряется.",
-    "reduce": "Слышу тебя. Снизил планку на сегодня — весь твой прогресс сохранён.",
-    "both": "Понимаю тебя. Добавил то, что просил, и аккуратно снизил нагрузку — прогресс сохранён.",
-    "none": "Спасибо, что доверяешь. Расскажи, как ты, — я рядом и помогу подстроить план.",
-    "fatigue_care": "Ты выложился на максимум — так и есть. День будет полегче: план смягчён, но ничего не сгорело.",
+    "none": (
+        "Я на связи. Напиши, что сделать: создать привычку, снизить план, "
+        "поставить на паузу или удалить — сделаю и подтвержу."
+    ),
+    "reduce": "Планка снижена, прогресс сохранён.",
+    "both": "Привычку добавил и нагрузку снизил — прогресс сохранён.",
+    "fatigue_care": (
+        "Понял: сил мало. Скажи, что сделать — снизить план или поставить "
+        "привычку на паузу, и я применю; прогресс при этом сохраняется."
+    ),
 }
 
 
@@ -487,6 +593,57 @@ def fallback_parse(
     fatigue = bool(_FATIGUE_RE.search(text))
     explicit_reduce = bool(_REDUCE_RE.search(text))
     heavy = bool(re.search(r"выгор\S*|устал\s+как\s+\S+|нет\s+сил|болю", text))
+    add_clarify = ""      # текст уточняющего вопроса для неполного add
+    delete_clarify = ""   # текст уточняющего вопроса для неполного delete
+
+    # --- удаление: «удали привычку X», «удали все привычки» --------------------
+    # (проверяем ПЕРЕД добавлением: «удали привычку» не про создание)
+    delete_intent = bool(_DELETE_RE.search(text))
+    if delete_intent:
+        wants_add = False
+        if _DELETE_ALL_RE.search(text):
+            if habits:
+                for h in habits:
+                    actions.append(
+                        {"type": "delete_habit", "habit_title": h["title"]}
+                    )
+            # привычек нет → останется честная реплика «удалять нечего»
+        else:
+            q = _QUOTED_RE.search(message)
+            needle = ""
+            target_habit = None
+            if q:
+                needle = q.group(1).lower()
+                target_habit = next(
+                    (h for h in habits if h["title"].lower() == needle), None
+                ) or next(
+                    (h for h in habits if needle in h["title"].lower()), None
+                )
+            if not needle:
+                m = re.search(
+                    r"привычк\w*\s+(.+?)(?=$|[,.;:!?]|\s+(?:на|из|с)\b)",
+                    text, re.IGNORECASE,
+                )
+                if m:
+                    needle = m.group(1).strip().lower()
+                    target_habit = next(
+                        (h for h in habits
+                         if needle in h["title"].lower()
+                         or h["title"].lower() in needle),
+                        None,
+                    )
+            if target_habit is None and not needle and len(habits) == 1:
+                target_habit = habits[0]  # «удали привычку» с единственной — очевидно
+            if target_habit:
+                actions.append(
+                    {"type": "delete_habit", "habit_title": target_habit["title"]}
+                )
+            elif needle:
+                # названо то, чего нет — честный отказ, ничего не трогаем
+                delete_clarify = _not_found_reply(habits)
+            elif habits:
+                names = ", ".join(f"«{h['title']}»" for h in habits[:8])
+                delete_clarify = f"Какую привычку удалить? Вот что у тебя есть: {names}."
 
     # --- заморозка: «заморозь английский на неделю/3 дня», «поставь на паузу» ---
     if re.search(r"замор\S*|на\s+пау[зкс]\S*|передышк\w+", text):
@@ -515,6 +672,10 @@ def fallback_parse(
                 }
             )
             wants_add = False  # «заморозь привычку X» — не про создание новой
+        else:
+            # просили паузу, но привычку не нашли — без заглушек и без выдумок
+            wants_add = False
+            delete_clarify = _not_found_reply(habits)
 
     # --- контрольная точка: «через 4 дня вернись», «контрольная точка» ----------
     m_point = re.search(r"(\d{1,2})\s*дн\S*", text)
@@ -527,22 +688,31 @@ def fallback_parse(
         )
 
     if wants_add:
-        title = _extract_title(text)
+        # Строгий поток: без заглушек. Создаём ТОЛЬКО если в сообщении есть
+        # и название, и явный график, и количество; иначе — уточняющий вопрос.
+        title = _extract_title(message)
+        sched = bool(_SCHEDULE_HINT_RE.search(message))
+        qty = _has_explicit_quantity(message)
         if not title:
-            title = "Новая привычка"
-        days = _extract_days(text)
-        target, unit = _extract_target_unit(text)
-        actions.append(
-            {
-                "type": "add_habit",
-                "title": title,
-                "category": "Другое",
-                "emoji": "",
-                "days": days,
-                "target": target,
-                "unit": unit,
-            }
-        )
+            add_clarify = _clarify_add("", False, False)
+            wants_add = False
+        elif not (sched and qty):
+            add_clarify = _clarify_add(title, not sched, not qty)
+            wants_add = False
+        else:
+            days = _extract_days(message)
+            target, unit = _extract_target_unit(message)
+            actions.append(
+                {
+                    "type": "add_habit",
+                    "title": title,
+                    "category": "Другое",
+                    "emoji": "",
+                    "days": days,
+                    "target": target,
+                    "unit": unit,
+                }
+            )
 
     if fatigue or explicit_reduce:
         # снижаем всё, что ещё не закрыто на сегодня (и «до N», если указано)
@@ -576,38 +746,69 @@ def fallback_parse(
                 {"type": "set_checkpoint", "days": 3, "reason": "усталость — проследим"}
             )
 
-    # --- реплики ---
-    has_checkpoint = any(a["type"] == "set_checkpoint" for a in actions)
-    has_freeze = any(a["type"] == "freeze_habit" for a in actions)
-    if has_freeze:
+    # --- реплики: только факты о том, что сделали, без шаблонных фраз ---
+    if add_clarify or delete_clarify:
+        reply = delete_clarify or add_clarify
+    elif not habits and delete_intent:
         reply = (
-            "Слышу тебя. Привычка на паузе — прогресс, серия и история сохранены, "
-            "дни заморозки не считаются пропущенными. Вернёшься, когда будешь готов(а)."
-        )
-    elif has_checkpoint and not any(
-        a["type"] in ("add_habit", "reduce_habit") for a in actions
-    ):
-        days = next(a["days"] for a in actions if a["type"] == "set_checkpoint")
-        reply = (
-            f"Договорились: контрольная точка через {days} дн. — вернусь "
-            "с честным сравнением статистики и мягким решением."
+            "Удалять нечего — привычек пока нет. Могу помочь создать первую: "
+            "напиши, что отслеживать, по каким дням и сколько раз в день."
         )
     elif actions:
-        has_add = any(a["type"] == "add_habit" for a in actions)
-        has_reduce = any(a["type"] == "reduce_habit" for a in actions)
-        if has_add and has_reduce:
-            reply = _SUPPORT_REPLIES["both"]
-        elif has_add:
-            reply = _SUPPORT_REPLIES["add"]
-        elif heavy:
-            reply = _SUPPORT_REPLIES["fatigue_care"]
-        else:
-            reply = _SUPPORT_REPLIES["reduce"]
+        parts: list[str] = []
+        for a in actions:
+            if a["type"] == "add_habit":
+                try:
+                    from db import plural_count  # локальный импорт — без циклов
+                    qty_text = f"{a['target']} {plural_count(int(a['target']), a['unit'])}"
+                except Exception:  # noqa: BLE001 — реплика не должна ломать применение
+                    qty_text = f"{a['target']} {a['unit']}"
+                parts.append(
+                    f"Добавил «{a['title']}» — {_days_label(a['days'])}, "
+                    f"{qty_text} в день."
+                )
+            elif a["type"] == "reduce_habit":
+                old = next(
+                    (h["target"] for h in habits if h["title"] == a["habit_title"]),
+                    "?",
+                )
+                parts.append(
+                    f"Снизил «{a['habit_title']}»: {old} → {a['new_target']} в день. "
+                    "Прогресс сохранён."
+                )
+            elif a["type"] == "delete_habit":
+                parts.append(f"Удалил «{a['habit_title']}».")
+            elif a["type"] == "freeze_habit":
+                until = (
+                    date.today() + timedelta(days=int(a["days"]) - 1)
+                ).strftime("%d.%m")
+                parts.append(
+                    f"«{a['habit_title']}» на паузе до {until} — прогресс сохранён, "
+                    "эти дни не считаются пропущенными."
+                )
+            elif a["type"] == "set_checkpoint":
+                parts.append(
+                    f"Контрольная точка через {a['days']} дн. — вернусь "
+                    "со сравнением статистики."
+                )
+        reply = " ".join(parts) or _SUPPORT_REPLIES["none"]
     elif zone in ("yellow", "red"):
+        # зона вычислена из реальной статистики недели — говорим честно и с цифрами
         from wellbeing import SUPPORT  # локальный импорт — без циклов
-        reply = SUPPORT.get(zone) or _SUPPORT_REPLIES["none"]
-    elif fatigue:
-        reply = _SUPPORT_REPLIES["fatigue_care"] if heavy else _SUPPORT_REPLIES["none"]
+        stats = (wellbeing or {}).get("stats") or {}
+        pct = stats.get("pct")
+        skipped = stats.get("skippedDays")
+        base = SUPPORT.get(zone) or ""
+        if base:
+            reply = (
+                base.rstrip() + " "
+                f"(по данным недели: выполнение {pct if pct is not None else '—'}%, "
+                f"полных пропусков {skipped}.)"
+            )
+        else:
+            reply = _SUPPORT_REPLIES["none"]
+    elif fatigue or heavy:
+        reply = _SUPPORT_REPLIES["fatigue_care"]
     else:
         reply = _SUPPORT_REPLIES["none"]
 
@@ -641,12 +842,85 @@ def reconcile_add_actions(plan: dict, message: str) -> dict:
     return plan
 
 
+def finalize_plan(plan: dict, message: str, habits: list[dict]) -> dict:
+    """Финальная фаза разбора (применяется к ЛЮБОМУ плану — LLM и fallback):
+    1) перекрёстный контроль add_habit по исходному тексту (reconcile);
+    2) строгая валидация: add_habit выживает только с названием, явным графиком
+       и количеством из сообщения — иначе действие снимается и ассистент задаёт
+       один уточняющий вопрос (никаких «Новая привычка» и дефолтных заглушек);
+    3) reduce/delete/freeze срабатывают только по реально существующим привычкам
+       — удаление несуществующих (галлюцинаций) блокируется."""
+    plan = reconcile_add_actions(plan, message)
+    actions = [a for a in (plan.get("actions") or []) if isinstance(a, dict)]
+
+    title = _extract_title(message)
+    sched = bool(_SCHEDULE_HINT_RE.search(message))
+    qty = _has_explicit_quantity(message)
+
+    valid: list[dict] = []
+    dropped_add = False       # неполный add → нужен уточняющий вопрос
+    dropped_missing = False   # действие по несуществующей привычке
+
+    for act in actions:
+        kind = (act.get("type") or "").lower().strip()
+        if kind == "add_habit":
+            act_title = str(act.get("title") or "").strip()
+            bad_title = (
+                not act_title
+                or act_title.lower() in _PLACEHOLDER_TITLES
+                or _title_is_service(act_title)
+            )
+            act["days"] = _norm_days(act.get("days"))
+            if not act["days"]:
+                # дни не названы ни моделью, ни текстом → берём из сообщения
+                act["days"] = _norm_days(_extract_days(message))
+            try:
+                act["target"] = max(1, min(100000, int(act.get("target") or 1)))
+            except (TypeError, ValueError):
+                act["target"] = 1
+            act["unit"] = str(act.get("unit") or "раз").strip()[:40] or "раз"
+            if bad_title or not sched or not qty or not act["days"]:
+                dropped_add = True
+                log.warning(
+                    "add_habit отклонён (неполные данные): title=%r sched=%s qty=%s",
+                    act_title, sched, qty,
+                )
+                continue
+            valid.append(act)
+        elif kind in ("reduce_habit", "delete_habit", "freeze_habit"):
+            t = str(act.get("habit_title") or "").strip().lower()
+            if not t or not _habit_exists(t, habits):
+                dropped_missing = True
+                log.warning("действие %s отклонено: привычки нет в списке", kind)
+                continue
+            valid.append(act)
+        else:
+            valid.append(act)  # none / set_checkpoint / прочее
+
+    if dropped_add and not any(
+        a.get("type") in ("add_habit", "reduce_habit", "delete_habit",
+                          "freeze_habit", "set_checkpoint")
+        for a in valid
+    ):
+        # ничего полезного применить нельзя — задаём уточняющий вопрос
+        plan["actions"] = [{"type": "none"}]
+        plan["reply"] = _clarify_add(title if title else "", not sched, not qty)
+        return plan
+    if dropped_missing and not valid:
+        plan["actions"] = [{"type": "none"}]
+        plan["reply"] = _not_found_reply(habits)
+        return plan
+
+    plan["actions"] = valid or [{"type": "none"}]
+    return plan
+
+
 async def parse_intent(
     message: str, habits: list[dict], history: list[dict], wellbeing: dict | None = None
 ) -> dict:
     """Точка входа NLP: LLM → при ошибке/отсутствии ключа локальные правила.
-    Оба пути проходят через reconcile_add_actions — перекрёстную проверку
-    add_habit по исходному тексту."""
+    Оба пути проходят через finalize_plan — reconcile + строгую валидацию
+    (без заглушек, без действий по несуществующим привычкам)."""
     wellbeing = wellbeing or {}
     if LLM_API_KEY:
         try:
@@ -656,4 +930,4 @@ async def parse_intent(
             plan = fallback_parse(message, habits, wellbeing)
     else:
         plan = fallback_parse(message, habits, wellbeing)
-    return reconcile_add_actions(plan, message)
+    return finalize_plan(plan, message, habits)

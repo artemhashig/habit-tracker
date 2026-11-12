@@ -186,12 +186,14 @@ def _coerce_days(raw) -> list[str] | None:
 def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
     """Применяет действия из разбора к базе. Возвращает описание в UI-чипах."""
     applied: list[dict] = []
+    # названия-заглушки запрещены: привычка без названия не создаётся
+    placeholder_titles = {"новая привычка", "привычка", "привычку", "название"}
 
     for act in actions or []:
         kind = (act.get("type") or "").lower().strip()
         if kind == "add_habit":
             title = str(act.get("title") or "").strip()
-            if not title:
+            if not title or title.lower() in placeholder_titles:
                 continue
             days = _coerce_days(act.get("days"))
             unit = str(act.get("unit") or "раз")
@@ -239,7 +241,14 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                 "text": f"Планка снижена: «{updated['title']}» {old} → {new_target} за день",
             })
         elif kind == "delete_habit":
-            habit = db.find_habit(str(act.get("habit_title") or ""), device)
+            habit = None
+            habit_id = act.get("habit_id")
+            if isinstance(habit_id, int) or (
+                isinstance(habit_id, str) and habit_id.isdigit()
+            ):
+                habit = db.get_habit(int(habit_id), device)
+            if habit is None and act.get("habit_title"):
+                habit = db.find_habit(str(act.get("habit_title")), device)
             if habit and db.delete_habit(habit["id"], device):
                 applied.append({
                     "type": "delete_habit",
