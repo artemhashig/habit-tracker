@@ -52,11 +52,6 @@ export default function HabitCard({ habit, onIncrement, onLongPress, disabled = 
 
       <div className="relative flex flex-col gap-1 py-4 pl-4 pr-[4.75rem]">
         <div className="flex items-center gap-2">
-          {habit.deficit > 0 && !done && (
-            <span className="text-[13px] font-extrabold text-white bg-[#b3261e] rounded-md px-1.5 flex-shrink-0">
-              −{habit.deficit}
-            </span>
-          )}
           <span className={`flex-1 min-w-0 text-[17px] font-extrabold leading-tight truncate ${scheduled || done ? 'text-white' : 'text-white/90'}`}>
             {habit.title}
           </span>

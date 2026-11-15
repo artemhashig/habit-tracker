@@ -50,7 +50,24 @@ _UNIT_CANON = {
     "отжиманий": "отжимание", "отжимания": "отжимание", "отжимание": "отжимание",
     "упражнений": "упражнение", "упражнения": "упражнение",
     "звонков": "звонок", "звонка": "звонок", "звонки": "звонок", "звонок": "звонок",
+    "звонку": "звонок",
 }
+
+
+def canon_unit(unit_raw: str) -> str:
+    """Единица к именительному падежу: словарь, затем грубая нормализация
+    незнакомых слов («лабу», «лабы» → «лаба»; «подходы» → «подход»)."""
+    u = (unit_raw or "раз").strip().lower()
+    canon = _UNIT_CANON.get(u)
+    if canon:
+        return canon
+    for suf, repl in (("у", "а"), ("ю", "я"), ("ы", "а")):
+        if u.endswith(suf) and len(u) > 3:
+            cand = u[:-1] + repl
+            if cand in _UNIT_CANON:
+                return _UNIT_CANON[cand]
+            return cand
+    return u
 
 
 def init_db():
@@ -155,7 +172,18 @@ def plural_count(n: int, unit: str) -> str:
         "упражнение": ("упражнение", "упражнения", "упражнений"),
         "звонок": ("звонок", "звонка", "звонков"),
     }
-    one, few, many = table.get(u, (u, u + "а", u + "ов"))
+    forms = table.get(u)
+    if forms is None:
+        # наивное склонение незнакомой единицы («лаба» → «лабы», «лаб»)
+        if u.endswith("а"):
+            forms = (u, u[:-1] + "ы", u[:-1])
+        elif u.endswith("я"):
+            forms = (u, u[:-1] + "и", u[:-1] + "й")
+        elif u.endswith("о"):
+            forms = (u, u[:-1] + "а", u[:-1])
+        else:
+            forms = (u, u + "а", u + "ов")
+    one, few, many = forms
     return _plural_ru(n, one, few, many)
 
 
@@ -460,8 +488,7 @@ def add_habit(
     )
     title = (title or "").strip() or "Новая привычка"
     title = title[:1].upper() + title[1:]  # «медитация» → «Медитация»
-    unit_raw = (unit or "раз").strip().lower()
-    unit = _UNIT_CANON.get(unit_raw, unit_raw)  # «минут» → «минута»
+    unit = canon_unit(unit)  # «минут» → «минута», «лабу» → «лаба»
     step = max(1, min(10000, int(step or 1)))
     with connection() as c:
         cur = c.execute(

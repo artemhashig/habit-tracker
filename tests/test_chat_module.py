@@ -667,6 +667,59 @@ work8 = next((h for h in client.get("/api/habits", headers=DEV8).json()
 check("«созвон» → категория Работа",
       work8 is not None and work8["category"] == "Работа", str(work8 and work8["category"]))
 
+print("\n=== 16. Консультация: предложения по умолчанию, «да», свободные единицы ===")
+DEV9 = {"X-Device-ID": "device-9", "Content-Type": "application/json"}
+
+def chat9(msg: str):
+    return client.post("/api/chat", json={"message": msg}, headers=DEV9).json()
+
+# «да» — не название привычки
+chat9("создай привычку")
+data = chat9("да")
+check("«да» на вопрос о названии → переспрос, не привычка «Да»",
+      "привычку добавить" in data["reply"]
+      and not any(a["type"] == "add_habit" for a in data["applied"]), data["reply"])
+
+# «сдавать лабы»: предложение категории подтверждаем «да»
+data = chat9("создай привычку сдавать лабы")
+check("категория предложена («Учеба» в вопросе)",
+      "категорию" in data["reply"].lower() and "Учеба" in data["reply"], data["reply"])
+data = chat9("да")
+check("«да» принимает категорию → вопрос о днях",
+      "по каким дням" in data["reply"].lower(), data["reply"])
+data = chat9("да")
+check("«да» принимает «каждый день» → вопрос о количестве",
+      "сколько" in data["reply"].lower(), data["reply"])
+data = chat9("1 лабу в день")
+check("«1 лабу в день» принят (вопрос о шаге)",
+      "шаг" in data["reply"].lower(), data["reply"])
+data = chat9("да")
+check("лабы созданы после подтверждений",
+      any(a["type"] == "add_habit" for a in data["applied"]), str(data["applied"]))
+labs = next((h for h in client.get("/api/habits", headers=DEV9).json()
+             if "лаб" in h["title"]), None)
+check("лабы: Учеба, каждый день, 1 лаба (все параметры подтверждены)",
+      labs is not None and labs["category"] == "Учеба" and len(labs["days"]) == 7
+      and labs["target"] == 1 and labs["unit"] == "лаба",
+      str(labs and (labs["category"], labs["days"], labs["target"], labs["unit"])))
+check("всё подтверждено человеком — без «сам»-пометок",
+      "подобрал сам" not in data["reply"] and "поставил сам" not in data["reply"]
+      and "выбрал сам" not in data["reply"], data["reply"])
+
+# свободная единица во множественном: «2 лабы» → лаба, «2 лабы» в реплике
+chat9("создай привычку сдавать зачёт")
+chat9("сам")
+chat9("каждый день")
+data = chat9("2 лабы")
+check("«2 лабы» приняты как количество", "шаг" in data["reply"].lower(), data["reply"])
+data = chat9("сам")
+zach = next((h for h in client.get("/api/habits", headers=DEV9).json()
+             if "зачёт" in h["title"]), None)
+check("зачёт: 2 лабы (единица нормализована)",
+      zach is not None and zach["target"] == 2 and zach["unit"] == "лаба",
+      str(zach and (zach["target"], zach["unit"])))
+check("склонение «2 лабы» в подтверждении", "2 лабы" in data["reply"], data["reply"])
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)

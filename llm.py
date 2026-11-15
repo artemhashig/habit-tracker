@@ -200,6 +200,99 @@ async def llm_parse(
     return parsed
 
 
+# --- LLM-консультант внутри интервью (ключ есть) -----------------------------------
+# Стратегия: не словарь, а понимание свободного языка + предложение значений
+# по умолчанию с просьбой подтвердить. Детерминированный разбор — страховка.
+
+_STAGE_RU = {
+    "category": "какая категория",
+    "schedule": "по каким дням выполнять",
+    "quantity": "сколько в день и в чём мерить",
+    "step": "шаг одного нажатия «+»",
+}
+
+
+def _interview_prompt(
+    title: str, stage: str, collected: dict, suggest: dict | None,
+    categories: list[str], missing: list[str],
+) -> str:
+    cat_list = ", ".join(categories) if categories else "пока нет"
+    miss = ", ".join(_STAGE_RU.get(s, s) for s in missing) or "ничего"
+    return (
+        "Ты — дружелюбный ассистент трекера привычек Grit. Ты в диалоге собираешь "
+        "параметры новой привычки. Человек пишет свободно — понимай смысл слов, "
+        "а не шаблоны: «1 лабу в день», «пару кружек», «по выходным», «давай по 2» — "
+        "это ответы.\n"
+        f"Привычка: «{title}».\n"
+        f"Сейчас выясняется: {_STAGE_RU.get(stage, stage)}.\n"
+        f"Уже собрано: {json.dumps(collected, ensure_ascii=False)}.\n"
+        f"Твоё прошлое предложение: {json.dumps(suggest or {}, ensure_ascii=False)} — "
+        "если человек его подтвердил («да»), верни его в understood.\n"
+        f"Категории пользователя: {cat_list}.\n"
+        f"Осталось выяснить: {miss}.\n\n"
+        "Ответь строго JSON без markdown, поля:\n"
+        '{"understood": {}, "proposal": {}, "reply": ""}\n'
+        "- understood — что ты понял ИЗ ЭТОГО СООБЩЕНИЯ; ничего не выдумывай, пустой "
+        "объект, если понять нечего. Поля: category (строка), days (массив токенов: "
+        "«Пн»…«Вс», дни месяца «1»…«31», интервал «каждыеN», N≥2; «каждый день» → "
+        "все семь), target (число), unit (строка, именительный падеж ед. числа: "
+        "«лаба», «стакан», «минута»), step (число — сколько счётчик прибавляет за "
+        "одно нажатие «+»).\n"
+        "- proposal — твоё разумное значение по умолчанию для первого недостающего "
+        "пункта из «осталось выяснить», подобранное по смыслу привычки "
+        "(«медитировать» → 10 минут; «звонить бабушке» → 1 звонок). Пустой объект, "
+        "если всё собрано.\n"
+        "- reply — 1–2 живых предложения по-русски: коротко подтверди, что понял, и "
+        "задай следующий вопрос как консультация — предложи значение из proposal и "
+        "попроси подтвердить («в день по одной лабе — верно?»). Если ответ понять "
+        "не удалось — мягко переспроси первый пункт из «осталось выяснить». "
+        "Не анкета, а разговор. Не пиши, что привычка создана — это не так."
+    )
+
+
+async def llm_interview_step(
+    message: str, title: str, stage: str, collected: dict, suggest: dict | None,
+    categories: list[str], missing: list[str], history: list[dict] | None = None,
+) -> dict | None:
+    """Шаг интервью через LLM: понимание свободного ответа + реплика.
+    None при любой неудаче — тогда работает детерминированный разбор."""
+    if not LLM_API_KEY:
+        return None
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        timeout=LLM_TIMEOUT,
+        max_retries=1,
+    )
+    messages = [
+        {"role": "system", "content": _interview_prompt(
+            title, stage, collected, suggest, categories, missing)},
+        *[
+            {"role": m["role"], "content": m["content"]}
+            for m in (history or [])[-6:]
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+        ],
+        {"role": "user", "content": message},
+    ]
+    try:
+        completion = await client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,  # type: ignore[arg-type]
+            temperature=0.4,
+        )
+    except Exception as e:  # noqa: BLE001 — любая неудача → детерминированный путь
+        log.warning("LLM-консультант интервью недоступен: %s", e)
+        return None
+    raw = completion.choices[0].message.content or ""
+    data = _extract_json(raw)
+    if not isinstance(data, dict) or not isinstance(data.get("reply"), str):
+        log.warning("LLM-консультант вернул не JSON: %s", raw[:160])
+        return None
+    return data
+
+
 # --- Локальный rule-based fallback (тесты / нет ключа) -----------------------------
 
 _FATIGUE_RE = re.compile(
@@ -373,9 +466,17 @@ def _split_time(text: str) -> tuple[str, str]:
 
 
 def _has_explicit_quantity(text: str) -> bool:
-    """В тексте есть числовая цель, не похожая на время («3/д», «10 минут»)."""
+    """В тексте есть числовая цель, не похожая на время/график
+    («3/д», «10 минут», «1 лабу», «2 бутылки»)."""
     cleaned, _ = _split_time(text)
-    return bool(_QUANTITY_HINT_RE.search(_normalize_shorthand(cleaned)))
+    cleaned = _normalize_shorthand(cleaned)
+    if _QUANTITY_HINT_RE.search(cleaned):
+        return True
+    # число + незнакомое слово — тоже цель, если это не график и не время
+    return any(
+        not _NOT_UNIT_RE.match(w)
+        for _, w in re.findall(r"\b(\d{1,3})\s+([а-яё]{2,24})\b", cleaned, re.IGNORECASE)
+    )
 
 
 # «по вт», «каждый день», «1 раз в день», «3/д» — явный график (не дефолт)
@@ -585,13 +686,15 @@ def _extract_target_unit(text: str) -> tuple[int, str]:
         unit = _UNIT_MAP[stem]
         target = num * 60 if stem == "час" else num
         return max(1, target), unit
-    # число + незнакомое слово («1 звонок», «2 бутылки») — берём как есть,
-    # если это точно не график/время; канонизирует единицы db.add_habit
+    # число + незнакомое слово («1 звонок», «1 лабу», «2 бутылки») — берём,
+    # если это точно не график/время; единицу приводим к именительному
     for m in re.finditer(r"\b(\d{1,3})\s+([а-яё]{2,24})\b", cleaned, re.IGNORECASE):
         word = m.group(2).lower()
         if _NOT_UNIT_RE.match(word):
             continue
-        return max(1, int(m.group(1))), word
+        from db import canon_unit
+
+        return max(1, int(m.group(1))), canon_unit(word)
     # число без единицы (после удаления времени и «/д» — это уже не часы)
     m = re.search(r"\b(\d{1,3})\b", _QUANTITY_RE.sub(" ", cleaned))
     if m:
@@ -953,9 +1056,16 @@ _REFUSAL_RE = re.compile(
     r"|не\s*хочу\s*отве|не\s*нужно|давай\s*свою",
     re.IGNORECASE,
 )
-# ответ-согласие: «да», «давай» на вопрос о категории = «подбери сам»
+# ответ-согласие: «да», «давай» на вопрос-предложение = принять предложение
 _AGREE_RE = re.compile(
-    r"^(?:да\b|ок\b|окей|хорошо|ладно|угу|ага|верно|точно|соглас\w*)", re.IGNORECASE
+    r"^(?:да\b|давай\b|ок\b|окей|хорошо|ладно|угу|ага|верно|точно|норм\b|соглас\w*)",
+    re.IGNORECASE,
+)
+# «да» целиком — не название привычки и не новый параметр
+_BARE_AGREE_RE = re.compile(
+    r"^(?:да|давай|ок|окей|хорошо|ладно|угу|ага|верно|точно|норм|соглас[еён]\w*)"
+    r"[.!\s]*$",
+    re.IGNORECASE,
 )
 # другие команды важнее интервью: удаление/снижение/пауза/контрольная точка
 _OTHER_CMD_RE = re.compile(
@@ -979,7 +1089,8 @@ _AUTO_CATEGORY = (
      "Здоровье"),
     (r"чита|книг|медит|дневник|рефлекс|аффирмац|саморазв|блог|обзор",
      "Саморазвитие"),
-    (r"уч\w*|курс|лекц|английск|немецк|испанск|язык|экзамен|домашк|диплом|конспект",
+    (r"уч\w*|курс|лекц|английск|немецк|испанск|язык|экзамен|зачет|зачёт|"
+     r"лаб[оауыи]|лаборатор|семинар|практикум|реферат|сесси|домашк|диплом|конспект",
      "Учеба"),
     (r"работ|проект|дедлайн|созвон|встреч|почт|задач|отчёт|отчет|митинг",
      "Работа"),
@@ -1096,39 +1207,55 @@ def _next_stage(cur: str, ans: dict) -> str:
     return "done"
 
 
-def _ask(stage: str, title: str, categories: list[str], ans: dict) -> str:
+def _ask(stage: str, title: str, categories: list[str], ans: dict) -> tuple[str, dict]:
+    """Вопрос этапа + предложение по умолчанию (стратегия консультации:
+    предлагаем разумное значение, человек подтверждает «да» или правит)."""
     if stage == "title":
         return (
             "Какую привычку добавить? Напиши название — "
             "например: «Бег», «Медитация», «Пить воду»."
-        )
+        ), {}
     if stage == "category":
+        auto = _auto_category(title)
         names = ", ".join(categories) if categories else ""
         if names:
-            return (
+            text = (
                 f"В какую категорию отнести «{title}»? Есть: {names}. "
                 "Назови одну из них, придумай новую или напиши «сам» — подберу."
             )
-        return (
-            f"В какую категорию отнести «{title}»? Назови свою или "
-            "напиши «сам» — подберу."
-        )
+        else:
+            text = (
+                f"В какую категорию отнести «{title}»? Назови свою или "
+                "напиши «сам» — подберу."
+            )
+        if auto != "Другое":
+            text += f" Или согласись с моим вариантом «{auto}» — просто «да»."
+            return text, {"category": auto}
+        return text, {}
     if stage == "schedule":
         return (
             f"По каким дням выполнять «{title}»? Например: каждый день, "
-            "по вт и чт, 1-го и 15-го числа, каждые 3 дня."
-        )
+            "по вт и чт, 1-го и 15-го числа, каждые 3 дня. "
+            "Если каждый день — просто напиши «да»."
+        ), {"days": list(DAY_CODES)}
     if stage == "quantity":
+        unit = (ans.get("unit") or "раз").lower()
         return (
             f"Сколько в день «{title}» и в чём мерить? "
-            "Например: 10 минут, 3 раза, 20 страниц."
-        )
+            "Например: 10 минут, 3 раза, 20 страниц. "
+            f"Или согласись с «1 {unit} в день» — просто «да»."
+        ), {"target": 1, "unit": ans.get("unit") or "раз"}
     if stage == "step":
+        from db import plural_count
+
+        step = _default_step(ans)
+        unit = (ans.get("unit") or "раз").lower()
         return (
             f"С каким шагом отмечать прогресс по «{title}»? "
-            "Например: 1 отжимание, 5 страниц. Можно написать «сам» — выберу за тебя."
-        )
-    return ""
+            f"Например: 1 отжимание, 5 страниц. Предлагаю {step} "
+            f"{plural_count(step, unit)} за нажатие — согласен?"
+        ), {"step": step}
+    return "", {}
 
 
 def _created_reply(act: dict, auto: list[str]) -> str:
@@ -1164,124 +1291,285 @@ def _start_interview(message: str, categories: list[str]) -> tuple[dict, str]:
     if _has_explicit_quantity(message):
         ans["target"], ans["unit"] = _extract_target_unit(message)
     if not title or _title_is_service(title) or title.lower() in _PLACEHOLDER_TITLES:
-        draft = {"title": "", "stage": "title", "ans": {}, "tries": 0, "auto": []}
-        return draft, _ask("title", "", categories, {})
+        question, suggest0 = _ask("title", "", categories, {})
+        draft = {"title": "", "stage": "title", "ans": {}, "tries": 0,
+                 "auto": [], "suggest": suggest0}
+        return draft, question
     stage = _next_stage("category", ans)
-    draft = {"title": title, "stage": stage, "ans": ans, "tries": 0, "auto": []}
-    return draft, _ask(stage, title, categories, ans)
+    question, suggest0 = _ask(stage, title, categories, ans)
+    draft = {"title": title, "stage": stage, "ans": ans, "tries": 0,
+             "auto": [], "suggest": suggest0}
+    return draft, question
 
 
-def _interview(
-    message: str, draft: dict, categories: list[str]
+def _stage_key(stage: str) -> str | None:
+    """Какой ключ ans закрывает этап."""
+    return {
+        "category": "category", "schedule": "days",
+        "quantity": "target", "step": "step",
+    }.get(stage)
+
+
+def _validate_params(raw: dict, categories: list[str] | None = None) -> dict:
+    """Параметры от LLM/предложений → допустимые значения; мусор выкидываем."""
+    out: dict = {}
+    if not isinstance(raw, dict):
+        return out
+    cat = raw.get("category")
+    if isinstance(cat, str):
+        cat = cat.strip().strip("«»\"'")[:40]
+        if cat and re.search(r"[а-яёa-z]", cat, re.I) and cat.lower() not in _PLACEHOLDER_TITLES:
+            out["category"] = cat[:1].upper() + cat[1:]
+    days = raw.get("days")
+    if isinstance(days, str):
+        days = _parse_schedule(days)
+    if isinstance(days, list):
+        toks: list[str] = []
+        for d in days:
+            s = str(d).strip()
+            low = s.lower()
+            if s in DAY_CODES:
+                tok = s
+            elif re.fullmatch(r"\d{1,2}", s) and 1 <= int(s) <= 31:
+                tok = s
+            elif re.fullmatch(r"каждые\d{1,2}", low):
+                tok = low
+            elif "выходн" in low:
+                toks.extend(["Сб", "Вс"])
+                continue
+            elif "будн" in low:
+                toks.extend(DAY_CODES[:5])
+                continue
+            elif low.startswith("кажд") or low in ("ежедневно", "весь день"):
+                toks.extend(DAY_CODES)
+                continue
+            else:
+                tok = next((c for stem, c in _DAY_STEMS if low.startswith(stem)), None)
+            if tok and tok not in toks:
+                toks.append(tok)
+        if toks:
+            out["days"] = toks
+    for key, hi in (("target", 100000), ("step", 10000)):
+        v = raw.get(key)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and v >= 1:
+            out[key] = min(int(v), hi)
+        elif isinstance(v, str) and v.strip().isdigit():
+            out[key] = min(int(v.strip()), hi)
+    unit = raw.get("unit")
+    if isinstance(unit, str) and unit.strip():
+        unit = re.sub(r"[^а-яёa-z -]", "", unit.lower()).strip()[:40]
+        if unit:
+            from db import canon_unit
+
+            out["unit"] = canon_unit(unit)
+    return out
+
+
+async def _interview(
+    message: str, draft: dict, categories: list[str],
+    history: list[dict] | None = None,
 ) -> tuple[dict | None, str, list[dict]]:
-    """Один шаг интервью. Возвращает (новый черновик | None, реплика, действия)."""
+    """Один шаг интервью. Понимание ответа: детерминированные правила + LLM-консультация
+    (если есть ключ — она первична: свободный язык, живые вопросы, предложения).
+    Возвращает (новый черновик | None, реплика, действия)."""
     title = (draft.get("title") or "").strip()
     ans = dict(draft.get("ans") or {})
     tries = int(draft.get("tries") or 0)
     auto = list(draft.get("auto") or [])
     stage = draft.get("stage") or "category"
+    suggest = dict(draft.get("suggest") or {})
+    history = history or []
 
     if stage == "title":
-        t = _extract_title(message)
-        if t and not _title_is_service(t) and t.lower() not in _PLACEHOLDER_TITLES:
-            title = t
-            stage = "category"
+        if _BARE_AGREE_RE.match(message.strip()):
+            tries += 1  # «да» — это не название
         else:
-            tries += 1
+            t = _extract_title(message)
+            if t and not _title_is_service(t) and t.lower() not in _PLACEHOLDER_TITLES:
+                title = t
+                stage = "category"
+            else:
+                tries += 1
+        if stage == "title":
             if tries >= 3:
                 return None, (
                     "Название так и не названо — интервью прервал. "
                     "Напиши «создай привычку <название>», когда будешь готов."
                 ), []
-    elif stage == "category":
+            q, _s = _ask("title", "", categories, {})
+            return {"title": "", "stage": "title", "ans": {}, "tries": tries,
+                    "auto": auto, "suggest": {}}, q, []
+        # название получено: график/количество могли прийти тем же сообщением,
+        # но ЭТО сообщение — не ответ на вопрос о категории
+        found0: dict = {}
+        sched0 = _parse_schedule(message)
+        if sched0:
+            found0["days"] = sched0
+        if _has_explicit_quantity(message):
+            found0["target"], found0["unit"] = _extract_target_unit(message)
+        merged0 = dict(found0)
+        nxt0 = _next_stage("category", merged0)
+        if nxt0 == "done":
+            act0 = {
+                "type": "add_habit",
+                "title": title,
+                "category": "Другое",
+                "emoji": "",
+                "days": merged0.get("days") or list(DAY_CODES),
+                "target": int(merged0.get("target") or 1),
+                "unit": merged0.get("unit") or "раз",
+                "step": int(merged0.get("step") or 1),
+            }
+            return None, _created_reply(act0, []), [act0]
+        question0, suggest0 = _ask(nxt0, title, categories, merged0)
+        return {"title": title, "stage": nxt0, "ans": merged0, "tries": 0,
+                "auto": [], "suggest": suggest0}, question0, []
+
+    found: dict = {}
+    autofilled = False
+
+    # --- 1. Детерминированный разбор ответа (правила — страховка) --------------
+    stage_param_found = False
+    if stage == "category":
         cat = _parse_category_answer(message, categories)
         if cat == "AUTO":
-            ans["category"] = _auto_category(title)
-            auto.append("category")
-            tries = 0
-        elif cat:
-            ans["category"] = cat
-            tries = 0
-        else:
-            tries += 1
-            if tries >= 2:  # игнор → подбираем сами
-                ans["category"] = _auto_category(title)
+            if (
+                _AGREE_RE.match(message.strip())
+                and not _REFUSAL_RE.search(message)
+                and suggest.get("category")
+            ):
+                found["category"] = suggest["category"]  # человек подтвердил «да»
+            else:
+                found["category"] = suggest.get("category") or _auto_category(title)
                 auto.append("category")
-                tries = 0
-        # прыжок вперёд: график/количество могли прийти тем же сообщением
-        sched = _parse_schedule(message)
-        if sched and not ans.get("days"):
-            ans["days"] = sched
-        if _has_explicit_quantity(message) and not ans.get("target"):
-            ans["target"], ans["unit"] = _extract_target_unit(message)
+            stage_param_found = True
+        elif cat:
+            found["category"] = cat
+            stage_param_found = True
     elif stage == "schedule":
         sched = _parse_schedule(message)
         if sched:
-            ans["days"] = sched
-            tries = 0
-        else:
-            # важный параметр — переспрашиваем, игнор не прощаем сразу
-            tries += 1
-            if tries >= 4:
-                ans["days"] = list(DAY_CODES)
-                auto.append("schedule")
-                tries = 0
-        if _has_explicit_quantity(message) and not ans.get("target"):
-            ans["target"], ans["unit"] = _extract_target_unit(message)
+            found["days"] = sched
+            stage_param_found = True
     elif stage == "quantity":
         if _has_explicit_quantity(message):
-            ans["target"], ans["unit"] = _extract_target_unit(message)
-            tries = 0
+            found["target"], found["unit"] = _extract_target_unit(message)
+            stage_param_found = True
         elif re.fullmatch(r"\d{1,3}", message.strip()):
             # голое число — тоже ответ на «сколько?» («20» → 20 раз)
-            ans["target"], ans["unit"] = int(message.strip()), (ans.get("unit") or "раз")
-            tries = 0
-        else:
-            tries += 1
-            if tries >= 4:
-                ans["target"], ans["unit"] = 1, "раз"
-                auto.append("quantity")
-                tries = 0
-        sched = _parse_schedule(message)
-        if sched and not ans.get("days"):
-            ans["days"] = sched
+            found["target"] = int(message.strip())
+            found["unit"] = ans.get("unit") or "раз"
+            stage_param_found = True
     elif stage == "step":
         if _REFUSAL_RE.search(message):
-            ans["step"] = _default_step(ans)
+            found["step"] = suggest.get("step") or _default_step(ans)
             auto.append("step")
-            tries = 0
+            stage_param_found = True
         else:
-            step = _parse_step_answer(message)
-            if step:
-                ans["step"] = step
-                tries = 0
-            else:
-                tries += 1
-                if tries >= 2:  # игнор → выбираем сами
-                    ans["step"] = _default_step(ans)
-                    auto.append("step")
-                    tries = 0
-    else:
-        stage = "category"
+            s = _parse_step_answer(message)
+            if s:
+                found["step"] = s
+                stage_param_found = True
 
-    nxt = _next_stage(stage if stage in _STAGES else "category", ans)
+    # попутные параметры тем же сообщением («спорт, по вск, 2 раза»)
+    if stage != "schedule" and not ans.get("days") and not found.get("days"):
+        sched = _parse_schedule(message)
+        if sched:
+            found["days"] = sched
+    if stage != "quantity" and not ans.get("target") and not found.get("target"):
+        if _has_explicit_quantity(message):
+            found["target"], found["unit"] = _extract_target_unit(message)
+
+    # --- 2. Соглашение с предложенным («да» на мой вопрос-предложение) ---------
+    if not stage_param_found and suggest and _AGREE_RE.match(message.strip()):
+        sugg = _validate_params(suggest, categories)
+        if sugg:
+            found.update(sugg)
+            stage_param_found = True
+
+    # --- 3. LLM-консультация: понимание свободного языка поверх правил ---------
+    llm_reply = ""
+    llm_proposal: dict = {}
+    if LLM_API_KEY and stage != "title":
+        tmp = {**ans, **found}
+        later = [st for st in _STAGES[_STAGES.index(stage) + 1:]
+                 if not _stage_filled(st, tmp)]
+        missing = later if _stage_filled(stage, tmp) else [stage, *later]
+        res = await llm_interview_step(
+            message, title, stage, tmp, suggest, categories, missing, history
+        )
+        if res:
+            understood = _validate_params(res.get("understood") or {}, categories)
+            for k, v in understood.items():
+                found[k] = v  # понимание LLM перекрывает шаблоны
+                if k == _stage_key(stage):
+                    stage_param_found = True
+            llm_proposal = _validate_params(res.get("proposal") or {}, categories)
+            llm_reply = (res.get("reply") or "").strip()[:600]
+
+    merged = dict(ans)
+    for k, v in found.items():
+        if v:
+            merged[k] = v
+
+    # --- 4. Не поняли → счётчик переспрашиваний → авто-подстановка -------------
+    stage_filled_now = _stage_filled(stage, merged)
+    if stage_filled_now:
+        tries = 0
+    else:
+        tries += 1
+        threshold = 2 if stage in ("category", "step") else 4
+        if tries >= threshold:
+            # игнор: заполняем сами (честно пометим при создании)
+            if stage == "category":
+                merged["category"] = suggest.get("category") or _auto_category(title)
+                auto.append("category")
+            elif stage == "schedule":
+                merged["days"] = suggest.get("days") or list(DAY_CODES)
+                auto.append("schedule")
+            elif stage == "quantity":
+                merged["target"] = suggest.get("target") or 1
+                merged["unit"] = suggest.get("unit") or "раз"
+                auto.append("quantity")
+            elif stage == "step":
+                merged["step"] = suggest.get("step") or _default_step(merged)
+                auto.append("step")
+            autofilled = True
+            tries = 0
+            stage_filled_now = True
+
+    nxt = _next_stage(stage, merged)
     if nxt == "done":
         act = {
             "type": "add_habit",
             "title": title,
-            "category": ans.get("category") or "Другое",
+            "category": merged.get("category") or "Другое",
             "emoji": "",
-            "days": ans.get("days") or list(DAY_CODES),
-            "target": int(ans.get("target") or 1),
-            "unit": ans.get("unit") or "раз",
-            "step": int(ans.get("step") or 1),
+            "days": merged.get("days") or list(DAY_CODES),
+            "target": int(merged.get("target") or 1),
+            "unit": merged.get("unit") or "раз",
+            "step": int(merged.get("step") or 1),
         }
         return None, _created_reply(act, auto), [act]
 
     if nxt != stage:
         tries = 0  # счётчик переспрашиваний — свой у каждого вопроса
-    new_draft = {"title": title, "stage": nxt, "ans": ans, "tries": tries, "auto": auto}
-    return new_draft, _ask(nxt, title, categories, ans), []
+    # вопрос следующего этапа + предложение по умолчанию
+    question, next_suggest = _ask(nxt, title, categories, merged)
+    reply = question
+    final_suggest = next_suggest
+    if llm_reply and not autofilled:
+        # живая формулировка от LLM (кроме случая, когда сами заполнили параметр)
+        reply = llm_reply
+        if llm_proposal:
+            final_suggest = llm_proposal
+    new_draft = {
+        "title": title, "stage": nxt, "ans": merged, "tries": tries,
+        "auto": auto, "suggest": final_suggest,
+    }
+    return new_draft, reply, []
 
 
 async def parse_intent(
@@ -1324,7 +1612,7 @@ async def parse_intent(
         ):
             draft, reply = _start_interview(message, categories)
             return {"reply": reply, "actions": [{"type": "none"}], "draft": draft}
-        new_draft, reply, actions = _interview(message, draft, categories)
+        new_draft, reply, actions = await _interview(message, draft, categories, history)
         return {
             "reply": reply,
             "actions": actions or [{"type": "none"}],
