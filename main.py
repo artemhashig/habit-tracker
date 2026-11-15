@@ -225,13 +225,8 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                 step=int(act.get("step") or 1),
                 device=device,
             )
-            chip = (
-                f"Добавлена привычка «{habit['title']}» — "
-                f"{habit['daysLabel'].lower()}, "
-                f"{habit['target']} {db.plural_count(habit['target'], habit['unit'])} в день"
-            )
-            if habit["step"] > 1:
-                chip += f", шаг {habit['step']} {db.plural_count(habit['step'], habit['unit'])}"
+            # детали создания уже в тексте реплики — чип только короткая метка
+            chip = f"Создано: «{habit['title']}»"
             applied.append({
                 "type": "add_habit",
                 "habit_id": habit["id"],

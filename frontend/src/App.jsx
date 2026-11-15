@@ -15,6 +15,7 @@ const CATEGORY_META = {
   Учеба: { border: '#8a6420', circleBg: '#3a2a10', icon: '#ffd166' },
   Работа: { border: '#2f5a8f', circleBg: '#12253c', icon: '#7cc0ff' },
   Дом: { border: '#5c4396', circleBg: '#221b3c', icon: '#c4b2ff' },
+  Общение: { border: '#2a6f7e', circleBg: '#10333a', icon: '#5eead4' },
 }
 const DEFAULT_META = { border: '#34344c', circleBg: '#26263a', icon: '#c9c9d4' }
 

@@ -49,6 +49,7 @@ _UNIT_CANON = {
     "подходов": "подход", "подхода": "подход", "подход": "подход",
     "отжиманий": "отжимание", "отжимания": "отжимание", "отжимание": "отжимание",
     "упражнений": "упражнение", "упражнения": "упражнение",
+    "звонков": "звонок", "звонка": "звонок", "звонки": "звонок", "звонок": "звонок",
 }
 
 
@@ -152,6 +153,7 @@ def plural_count(n: int, unit: str) -> str:
         "подход": ("подход", "подхода", "подходов"),
         "отжимание": ("отжимание", "отжимания", "отжиманий"),
         "упражнение": ("упражнение", "упражнения", "упражнений"),
+        "звонок": ("звонок", "звонка", "звонков"),
     }
     one, few, many = table.get(u, (u, u + "а", u + "ов"))
     return _plural_ru(n, one, few, many)
@@ -450,6 +452,12 @@ def add_habit(
             if tok not in valid_days:
                 valid_days.append(tok)
     valid_days = valid_days or list(DAY_CODES)
+    # канонический порядок: дни недели (Пн…Вс), потом дни месяца, потом интервал
+    valid_days = (
+        [d for d in DAY_CODES if d in valid_days]
+        + sorted((t for t in valid_days if t.isdigit()), key=int)
+        + [t for t in valid_days if _DAYS_INTERVAL_RE.match(t)]
+    )
     title = (title or "").strip() or "Новая привычка"
     title = title[:1].upper() + title[1:]  # «медитация» → «Медитация»
     unit_raw = (unit or "раз").strip().lower()

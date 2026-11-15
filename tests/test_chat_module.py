@@ -587,6 +587,86 @@ check("растяжка не создана, планка удалена",
       not any(h["title"] in ("Растяжка", "Планка")
               for h in client.get("/api/habits", headers=DEV7).json()))
 
+print("\n=== 15. Регрессии реального диалога: «Звонить бабушкам» ===")
+DEV8 = {"X-Device-ID": "device-8", "Content-Type": "application/json"}
+
+def chat8(msg: str):
+    return client.post("/api/chat", json={"message": msg}, headers=DEV8).json()
+
+data = chat8("создай привычку")
+check("пустая команда → вопрос о названии",
+      "привычку добавить" in data["reply"], data["reply"])
+data = chat8("Звонить бабушкам")
+check("вопрос о категории", "категорию" in data["reply"].lower(), data["reply"])
+data = chat8("Сам придумай")
+check("отказ категории → вопрос о днях",
+      "по каким дням" in data["reply"].lower(), data["reply"])
+data = chat8("каждое вск и сб")
+check("«каждое вск и сб» принято (вопрос о количестве)",
+      "сколько" in data["reply"].lower(), data["reply"])
+data = chat8("в день 1 звонок")
+check("«в день 1 звонок» принят сразу (вопрос о шаге)",
+      "шаг" in data["reply"].lower(), data["reply"])
+data = chat8("1")
+check("шаг 1 принят → создание", any(a["type"] == "add_habit" for a in data["applied"]),
+      str(data["applied"]))
+grandma = next((h for h in client.get("/api/habits", headers=DEV8).json()
+                if h["title"] == "Звонить бабушкам"), None)
+check("«Звонить бабушкам» создана", grandma is not None)
+check("дни = Сб и Вс (вск распознан)",
+      grandma is not None and grandma["days"] == ["Сб", "Вс"],
+      str(grandma and grandma["days"]))
+check("цель 1 звонок",
+      grandma is not None and grandma["target"] == 1 and grandma["unit"] == "звонок",
+      str(grandma and (grandma["target"], grandma["unit"])))
+check("категория = Общение (авто)",
+      grandma is not None and grandma["category"] == "Общение", str(grandma and grandma["category"]))
+add_act = next((a for a in data["applied"] if a["type"] == "add_habit"), None)
+check("чип короткий («Создано: …»), без дублирования реплики",
+      add_act is not None and add_act["text"].startswith("Создано:")
+      and "Добавлена привычка" not in data["reply"],
+      str(add_act and add_act["text"]))
+
+# «1 звонок» отдельным ответом и «2 звонка» — склонение единицы
+chat8("создай привычку звонить маме")
+chat8("сам")
+chat8("каждый день")
+data = chat8("2 звонка")
+check("«2 звонка» приняты как количество", "шаг" in data["reply"].lower(), data["reply"])
+data = chat8("сам")
+mom = next((h for h in client.get("/api/habits", headers=DEV8).json()
+            if h["title"] == "Звонить маме"), None)
+check("звонить маме: 2 звонка в день",
+      mom is not None and mom["target"] == 2 and mom["unit"] == "звонок",
+      str(mom and (mom["target"], mom["unit"])))
+check("в подтверждении «2 звонка» (склонение)",
+      "2 звонка" in data["reply"], data["reply"])
+
+# голое число на этапе количества («20» → 20 раз)
+chat8("создай привычку медитировать")
+chat8("сам")
+chat8("по будням")
+data = chat8("20")
+check("голое число принято как количество", "шаг" in data["reply"].lower(), data["reply"])
+data = chat8("1")
+med8 = next((h for h in client.get("/api/habits", headers=DEV8).json()
+             if h["title"] == "Медитировать"), None)
+check("медитировать: 20 раз, по будням",
+      med8 is not None and med8["target"] == 20 and med8["unit"] == "раз"
+      and med8["days"] == ["Пн", "Вт", "Ср", "Чт", "Пт"],
+      str(med8 and (med8["target"], med8["unit"], med8["days"])))
+
+# «созвон» — Работа, не Общение
+chat8("создай привычку вечерний созвон")
+chat8("не важно")
+chat8("каждый день")
+chat8("1 раз")
+chat8("1")
+work8 = next((h for h in client.get("/api/habits", headers=DEV8).json()
+              if "созвон" in h["title"]), None)
+check("«созвон» → категория Работа",
+      work8 is not None and work8["category"] == "Работа", str(work8 and work8["category"]))
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)
