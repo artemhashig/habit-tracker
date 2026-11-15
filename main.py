@@ -20,6 +20,7 @@
 """
 import logging
 import os
+import re
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Query, Request
@@ -68,6 +69,7 @@ class HabitIn(BaseModel):
     days: list[str] | None = None      # None → все 7 дней
     target: int = Field(default=1, ge=1, le=100000)
     unit: str = Field(default="раз", max_length=40)
+    step: int = Field(default=1, ge=1, le=10000)
 
 
 def _device(request: Request) -> str:
@@ -115,16 +117,24 @@ async def create_habit(body: HabitIn, request: Request):
         days=body.days,
         target=body.target,
         unit=body.unit,
+        step=body.step,
         device=_device(request),
     )
 
 
 @app.post("/api/habits/{habit_id}/increment")
 async def increment_habit(
-    habit_id: int, request: Request, day: str = Query(default="", alias="date")
+    habit_id: int, request: Request,
+    day: str = Query(default="", alias="date"),
+    step: int = Query(default=0, ge=0, le=10000),
 ):
-    """Клик «+» на конкретный день (?date=YYYY-MM-DD, по умолчанию сегодня)."""
-    habit = db.increment(habit_id, _device(request), day=_parse_day(day))
+    """Клик «+» на конкретный день: добавляет шаг привычки (?step=N — вручную)."""
+    device = _device(request)
+    habit = db.get_habit(habit_id, device, _parse_day(day))
+    if not habit:
+        return {"error": "Not found"}
+    step_n = step if step > 0 else max(1, int(habit.get("step") or 1))
+    habit = db.increment(habit_id, device, step=step_n, day=_parse_day(day))
     if not habit:
         return {"error": "Not found"}
     return habit
@@ -164,23 +174,31 @@ async def delete_category(category: str, request: Request):
 # --- Чат-модуль ----------------------------------------------------------------
 
 def _coerce_days(raw) -> list[str] | None:
-    """Дни от LLM → список кодов недели или None («каждый день»)."""
+    """Дни от LLM → токены графика или None («каждый день»).
+
+    Токены: коды недели («Пн»), дни месяца («1»), интервал («каждые3»),
+    либо текст-строка с днями («пн, вт», «выходные») — разбираем по словам."""
     if raw is None:
         return None
-    if isinstance(raw, list):
-        text = " ".join(str(d).lower() for d in raw)
-    else:
-        text = str(raw).lower()
-    days = [d for d in db.DAY_CODES if d.lower() in text]
-    if days:
-        return days
-    if "выходн" in text:
-        return ["Сб", "Вс"]
-    if "будням" in text or "будни" in text:
-        return list(db.DAY_CODES[:5])
-    if any(word in text for word in ("каждый", "ежедневно", "каждый день", "все")):
-        return None  # все 7 дней
-    return None
+    tokens = raw if isinstance(raw, list) else [raw]
+    out: list[str] = []
+    for tok in tokens:
+        s = str(tok).strip()
+        low = s.lower()
+        if s in db.DAY_CODES:
+            out.append(s)
+        elif re.fullmatch(r"\d{1,2}", s) and 1 <= int(s) <= 31:
+            out.append(s)
+        elif re.fullmatch(r"каждые\d{1,2}", low):
+            out.append(low)
+        else:
+            out.extend(d for d in db.DAY_CODES if d.lower() in low)
+            if "выходн" in low:
+                out.extend(["Сб", "Вс"])
+            if "будн" in low:
+                out.extend(db.DAY_CODES[:5])
+    out = list(dict.fromkeys(out))
+    return out or None
 
 
 def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
@@ -204,16 +222,20 @@ def _apply_actions(actions: list[dict], device: str = "") -> list[dict]:
                 days=days,
                 target=int(act.get("target") or 1),
                 unit=unit,
+                step=int(act.get("step") or 1),
                 device=device,
             )
+            chip = (
+                f"Добавлена привычка «{habit['title']}» — "
+                f"{habit['daysLabel'].lower()}, "
+                f"{habit['target']} {db.plural_count(habit['target'], habit['unit'])} в день"
+            )
+            if habit["step"] > 1:
+                chip += f", шаг {habit['step']} {db.plural_count(habit['step'], habit['unit'])}"
             applied.append({
                 "type": "add_habit",
                 "habit_id": habit["id"],
-                "text": (
-                    f"Добавлена привычка «{habit['title']}» — "
-                    f"{habit['daysLabel'].lower()}, "
-                    f"{habit['target']} {db.plural_count(habit['target'], habit['unit'])} в день"
-                ),
+                "text": chip,
             })
         elif kind == "reduce_habit":
             habit = None
@@ -325,7 +347,18 @@ async def chat(body: ChatIn, request: Request):
     wellbeing_ctx = {"zone": info["zone"], "stats": info, "prompt": info["prompt"]}
 
     try:
-        plan = await parse_intent(message, habits, history[:-1], wellbeing_ctx)
+        draft = db.get_draft(device)
+        categories = db.list_categories(device)
+        plan = await parse_intent(
+            message, habits, history[:-1], wellbeing_ctx,
+            draft=draft, categories=categories,
+        )
+        # черновик интервью: обновляем/очищаем после разбора
+        new_draft = plan.pop("draft", None)
+        if new_draft:
+            db.set_draft(device, new_draft)
+        elif draft:
+            db.clear_draft(device)
     except Exception:
         logging.getLogger("chat").exception("NLP parse failed")
         plan = {

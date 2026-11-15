@@ -10,6 +10,7 @@
 """
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -45,6 +46,9 @@ _UNIT_CANON = {
     "сеансов": "сеанс", "сеанса": "сеанс",
     "книг": "книга", "книги": "книга",
     "часов": "минута", "часа": "минута", "час": "минута",
+    "подходов": "подход", "подхода": "подход", "подход": "подход",
+    "отжиманий": "отжимание", "отжимания": "отжимание", "отжимание": "отжимание",
+    "упражнений": "упражнение", "упражнения": "упражнение",
 }
 
 
@@ -81,6 +85,12 @@ def init_db():
                 created_at  TEXT NOT NULL,
                 device      TEXT NOT NULL DEFAULT ''     -- X-Device-ID владельца
             );
+            CREATE TABLE IF NOT EXISTS chat_drafts (
+                device     TEXT PRIMARY KEY,
+                kind       TEXT NOT NULL DEFAULT 'habit',
+                data       TEXT NOT NULL,           -- JSON незавершённого интервью
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS users (
                 id         TEXT PRIMARY KEY,            -- X-Device-ID из localStorage
                 name       TEXT NOT NULL DEFAULT 'Гость',
@@ -103,6 +113,7 @@ def init_db():
             ("habits", "device", "TEXT NOT NULL DEFAULT ''"),
             ("habits", "frozen_from", "TEXT"),
             ("habits", "frozen_until", "TEXT"),
+            ("habits", "step", "INTEGER NOT NULL DEFAULT 1"),
             ("chat_messages", "device", "TEXT NOT NULL DEFAULT ''"),
         ):
             cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
@@ -138,20 +149,69 @@ def plural_count(n: int, unit: str) -> str:
         "километр": ("километр", "километра", "километров"),
         "км": ("километр", "километра", "километров"),
         "книга": ("книга", "книги", "книг"),
+        "подход": ("подход", "подхода", "подходов"),
+        "отжимание": ("отжимание", "отжимания", "отжиманий"),
+        "упражнение": ("упражнение", "упражнения", "упражнений"),
     }
     one, few, many = table.get(u, (u, u + "а", u + "ов"))
     return _plural_ru(n, one, few, many)
 
 
+_DAYS_INTERVAL_RE = re.compile(r"^каждые(\d{1,2})$")
+
+
+def _scheduled_on(d: date, days: list[str], created: date | None = None) -> bool:
+    """День d попадает в график привычки.
+
+    График хранится токенами:
+      «Пн»…«Вс»  — дни недели;
+      «1»…«31»   — дни месяца;
+      «каждыеN»  — интервал «каждые N дней» (отсчёт от даты создания).
+    Смешанный график: достаточно любого совпавшего токена."""
+    for tok in days or []:
+        if tok in DAY_CODES:
+            if _weekday_ru(d) == tok:
+                return True
+        elif tok.isdigit():
+            if d.day == int(tok):
+                return True
+        else:
+            m = _DAYS_INTERVAL_RE.match(tok)
+            if m:
+                base = created or d
+                if d >= base and (d - base).days % max(1, int(m.group(1))) == 0:
+                    return True
+    return False
+
+
 def days_label(days: list[str]) -> str:
-    dayset = [d for d in DAY_CODES if d in days]
-    if len(dayset) == 7:
-        return "Каждый день"
-    if len(dayset) == 6 and set(dayset) == set(DAY_CODES[:6]):
-        return "Пн – Сб"
-    if len(dayset) == 5 and set(dayset) == set(DAY_CODES[:5]):
-        return "Пн – Пт"
-    return ", ".join(dayset) if dayset else "Гибкий график"
+    weekdays = [d for d in DAY_CODES if d in days]
+    month_days = sorted(int(t) for t in days if str(t).isdigit())
+    interval = next(
+        (t for t in days if _DAYS_INTERVAL_RE.match(str(t))), None
+    )
+    parts: list[str] = []
+    if interval:
+        parts.append(f"каждые {_DAYS_INTERVAL_RE.match(interval).group(1)} дн.")
+    if weekdays:
+        if len(weekdays) == 7:
+            parts.append("каждый день")
+        elif len(weekdays) == 6 and set(weekdays) == set(DAY_CODES[:6]):
+            parts.append("Пн – Сб")
+        elif len(weekdays) == 5 and set(weekdays) == set(DAY_CODES[:5]):
+            parts.append("Пн – Пт")
+        else:
+            parts.append(", ".join(weekdays))
+    if month_days:
+        if len(month_days) <= 2:
+            nums = " и ".join(f"{n}-го" for n in month_days)
+        else:
+            nums = ", ".join(f"{n}-го" for n in month_days[:-1]) + f" и {month_days[-1]}-го"
+        parts.append(f"{nums} числа месяца")
+    if not parts:
+        return "Гибкий график"
+    out = ", ".join(parts)
+    return out[:1].upper() + out[1:]
 
 
 def _weekday_ru(d: date) -> str:
@@ -226,12 +286,13 @@ def _on_freeze(d: date, window: tuple[date | None, date | None]) -> bool:
 def _calc_streak(
     c: sqlite3.Connection, habit_id: int, days: list[str], today: date,
     window: tuple[date | None, date | None] = (None, None),
+    created: date | None = None,
 ) -> int:
     """Серия закрытых запланированных дней, от сегодня назад (заморозка — нейтрально)."""
     streak = 0
     d = today
     for _ in range(60):  # дальше 60 суток историю не считаем
-        if _weekday_ru(d) in days and not _on_freeze(d, window):
+        if _scheduled_on(d, days, created) and not _on_freeze(d, window):
             log = c.execute(
                 "SELECT count FROM habit_logs WHERE habit_id=? AND day=?",
                 (habit_id, d.isoformat()),
@@ -263,7 +324,7 @@ def _calc_deficit(
     missed = 0
     d = today - timedelta(days=1)
     while d >= start and (today - d).days <= 60:
-        if _weekday_ru(d) in days and not _on_freeze(d, window):
+        if _scheduled_on(d, days, start) and not _on_freeze(d, window):
             log = c.execute(
                 "SELECT count FROM habit_logs WHERE habit_id=? AND day=?",
                 (habit_id, d.isoformat()),
@@ -292,7 +353,7 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
     # привычка существует только с даты создания и позже: задним числом
     # она не «запланирована» и не числится пропущенной
     scheduled_today = (
-        (_weekday_ru(day) in days)
+        _scheduled_on(day, days, created)
         and not frozen
         and (created is None or day >= created)
     )
@@ -302,7 +363,7 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
         else ("done" if done and (scheduled_today or current > 0) else "behind")
     )
 
-    streak = _calc_streak(c, row["id"], days, day, window)
+    streak = _calc_streak(c, row["id"], days, day, window, created)
     deficit = _calc_deficit(c, row["id"], days, row["created_at"], day, window)
 
     label = days_label(days)
@@ -320,6 +381,8 @@ def _row_to_habit(c: sqlite3.Connection, row: sqlite3.Row, day: date) -> dict:
         "daysLabel": label,
         "target": row["target"],
         "unit": row["unit"],
+        "step": (row["step"] if "step" in row.keys() else 1) or 1,
+        "createdAt": row["created_at"],
         "current": current,
         "streak": streak,
         "deficit": deficit,
@@ -376,18 +439,26 @@ def add_habit(
     days: list[str] | None = None,
     target: int = 1,
     unit: str = "раз",
+    step: int = 1,
     device: str = "",
 ) -> dict:
     """Создаёт привычку и возвращает её в формате выдачи API."""
-    valid_days = [d for d in (days or []) if d in DAY_CODES] or list(DAY_CODES)
+    valid_days: list[str] = []
+    for tok in days or []:
+        tok = str(tok).strip()
+        if tok in DAY_CODES or (tok.isdigit() and 1 <= int(tok) <= 31) or _DAYS_INTERVAL_RE.match(tok):
+            if tok not in valid_days:
+                valid_days.append(tok)
+    valid_days = valid_days or list(DAY_CODES)
     title = (title or "").strip() or "Новая привычка"
     title = title[:1].upper() + title[1:]  # «медитация» → «Медитация»
     unit_raw = (unit or "раз").strip().lower()
     unit = _UNIT_CANON.get(unit_raw, unit_raw)  # «минут» → «минута»
+    step = max(1, min(10000, int(step or 1)))
     with connection() as c:
         cur = c.execute(
-            "INSERT INTO habits (title, category, emoji, days, target, unit, created_at, device)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO habits (title, category, emoji, days, target, unit, step, created_at, device)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 title,
                 (category or "Другое").strip() or "Другое",
@@ -395,6 +466,7 @@ def add_habit(
                 json.dumps(valid_days),
                 max(1, int(target or 1)),
                 unit,
+                step,
                 date.today().isoformat(),
                 device,
             ),
@@ -496,6 +568,41 @@ def set_freeze(habit_id: int, device: str, days: int = 7) -> dict | None:
 
 
 # --- Чат -----------------------------------------------------------------------
+
+def list_categories(device: str) -> list[str]:
+    """Категории устройства (порядок появления), для вопроса при создании."""
+    with connection() as c:
+        rows = c.execute(
+            "SELECT DISTINCT category FROM habits WHERE device=? ORDER BY id",
+            (device,),
+        ).fetchall()
+    return [r["category"] for r in rows if r["category"]]
+
+
+def get_draft(device: str) -> dict | None:
+    """Незавершённое интервью создания привычки (JSON-черновик)."""
+    with connection() as c:
+        row = c.execute(
+            "SELECT data FROM chat_drafts WHERE device=?", (device,)
+        ).fetchone()
+    return json.loads(row["data"]) if row else None
+
+
+def set_draft(device: str, data: dict):
+    with connection() as c:
+        c.execute(
+            "INSERT INTO chat_drafts (device, kind, data, updated_at)"
+            " VALUES (?, 'habit', ?, ?)"
+            " ON CONFLICT(device) DO UPDATE SET data=excluded.data,"
+            " updated_at=excluded.updated_at",
+            (device, json.dumps(data, ensure_ascii=False), date.today().isoformat()),
+        )
+
+
+def clear_draft(device: str):
+    with connection() as c:
+        c.execute("DELETE FROM chat_drafts WHERE device=?", (device,))
+
 
 def add_chat_message(role: str, content: str, actions: list | None, device: str) -> int:
     with connection() as c:

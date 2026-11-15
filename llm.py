@@ -84,14 +84,11 @@ SYSTEM_PROMPT = """Ты — эмпатичный ассистент дневни
   Не хватает данных — честно скажи об этом одним словом и задай вопрос.
 - reply — ТОЛЬКО финальный текст пользователю (1–3 предложения), без внутренних
   рассуждений, без упоминаний JSON/действий/системных правил, без markdown и эмодзи.
-- Уточняющий вопрос вместо заглушек: add_habit создаётся ТОЛЬКО если в тексте
-  (или очевидно из истории) есть ВСЁ: что за занятие (title), по каким дням (days)
-  и сколько (target/unit). Команда без деталей («создай привычку», «создай»,
-  «привычка», «добавь привычку») → {"type": "none"} и ОДИН конкретный уточняющий
-  вопрос в reply: какая привычка, какие дни, сколько раз/минут. НИКОГДА не создавай
-  привычку-заглушку («Новая привычка», «Привычка») и не ставь дефолтные план/дни
-  за пользователя. Каждый следующий ответ пользователя дополняет картину —
-  как только все три части названы, создавай привычку одним действием.
+- Создание привычки идёт пошаговым интервью: система сама по очереди спрашивает
+  категорию, график, цель и шаг. Тебе НЕ нужно возвращать add_habit — если
+  пользователь просит создать привычку или отвечает на вопросы интервью,
+  верни {"type": "none"} и короткую фактическую реплику. Заглушки
+  («Новая привычка») и дефолтные план/дни за пользователя запрещены.
 - delete_habit: {"type": "delete_habit", "habit_title": "..."} — удалить привычку;
   название ТОЧНО из списка привычек. «удали все привычки» → по ОДНОМУ delete_habit
   на каждую привычку из списка (без пропусков). Удалять то, чего нет в списке,
@@ -237,7 +234,7 @@ _DAY_NAME_RE = re.compile(
 )
 _TARGET_RE = re.compile(
     r"(\d{1,3})\s*(мин\w*|страниц\w*|раз\w*|стакан\w*|км|километр\w*|повторени\w*"
-    r"|сеанс\w*|час\w*|штук\w*)?",
+    r"|сеанс\w*|час\w*|штук\w*|подход\w*|отжимани\w*|упражнени\w*)?",
     re.IGNORECASE,
 )
 _UNIT_MAP = {
@@ -248,6 +245,9 @@ _UNIT_MAP = {
     "км": "км", "километр": "километр", "километра": "километр",
     "повторение": "повторение", "повторения": "повторение", "повторений": "повторение",
     "сеанс": "сеанс", "сеанса": "сеанс", "сеансов": "сеанс",
+    "подход": "подход", "подхода": "подход", "подходов": "подход",
+    "отжимание": "отжимание", "отжимания": "отжимание", "отжиманий": "отжимание",
+    "упражнение": "упражнение", "упражнения": "упражнение", "упражнений": "упражнение",
     "штук": "раз", "час": "минута", "часа": "минута",
 }
 
@@ -287,7 +287,7 @@ _DAYS_PHRASE_RE = re.compile(
 _QUANTITY_RE = re.compile(
     r"\b\d{1,3}\s*(?:/\s*(?:д|дн|день)\b"
     r"|\s*(?:раз\w*|мин\w*|страниц\w*|стакан\w*|километр\w*|км\b|повторени\w*"
-    r"|сеанс\w*|штук\w*|час\w*))"
+    r"|сеанс\w*|штук\w*|час\w*|подход\w*|отжимани\w*|упражнени\w*))"
     r"(?:\s*(?:в|на)?\s*(?:день|недел\w*))?",
     re.IGNORECASE,
 )
@@ -296,7 +296,7 @@ _QUANTITY_RE = re.compile(
 _QUANTITY_HINT_RE = re.compile(
     r"\b\d{1,3}\s*(?:/\s*(?:д|дн|день)\b"
     r"|\s*(?:раз\w*|мин\w*|страниц\w*|стакан\w*|километр\w*|км\b|повторени\w*"
-    r"|сеанс\w*|штук\w*|час\w*))",
+    r"|сеанс\w*|штук\w*|час\w*|подход\w*|отжимани\w*|упражнени\w*))",
     re.IGNORECASE,
 )
 
@@ -915,13 +915,397 @@ def finalize_plan(plan: dict, message: str, habits: list[dict]) -> dict:
     return plan
 
 
+# === Интервью создания привычки: пошаговый сбор параметров =======================
+#
+# Порядок вопросов: категория → график → цель+единица → шаг.
+# Важное (график, цель) — переспрашиваем; отказ/игнор категории и шага —
+# генерируем сами. Никаких заглушек: привычка создаётся только после полного
+# набора параметров. Черновик интервью хранится в БД (chat_drafts) по устройству.
+
+_CANCEL_RE = re.compile(
+    r"отмен\w*|забудь|отставить|передумал|стоп\b|хватит\s*спраш", re.IGNORECASE
+)
+# отказ от ответа: «сами подбери», «не важно» — параметр генерируем сами
+_REFUSAL_RE = re.compile(
+    r"\bсам(?:и|о|а|м)?\b|не\s*зна\w*|любой|все\s*равно|неважно|не\s*важно"
+    r"|как\s*хочешь|без\s*разницы|дефолт|умолчан|пропуст\w*|не\s*буд\w*"
+    r"|не\s*хочу\s*отве|не\s*нужно|давай\s*свою",
+    re.IGNORECASE,
+)
+# ответ-согласие: «да», «давай» на вопрос о категории = «подбери сам»
+_AGREE_RE = re.compile(
+    r"^(?:да\b|ок\b|окей|хорошо|ладно|угу|ага|верно|точно|соглас\w*)", re.IGNORECASE
+)
+# другие команды важнее интервью: удаление/снижение/пауза/контрольная точка
+_OTHER_CMD_RE = re.compile(
+    r"удал\w*|снес\w*|избав\w*|стёр|замороз\w*|на\s+пау[зкс]|передышк\w*|"
+    r"снизь\w*|уменьши\w*|сократи\w*|полегче|послабл\w*|контрольн\w*\s*точк",
+    re.IGNORECASE,
+)
+
+# «каждые 3 дня», «через день» — интервальный график
+_INTERVAL_WORDS_RE = re.compile(r"кажд\w*\s+(\d{1,2})\s+дн\w*", re.IGNORECASE)
+_EVERY_OTHER_RE = re.compile(r"через\s+день|через\s+сутки", re.IGNORECASE)
+# «1-го и 15-го», «5 числа каждого месяца» — дни месяца
+_MONTH_WORDS_RE = re.compile(r"числ\w*|месяц\w*", re.IGNORECASE)
+
+# автокатегория по ключевым словам названия (когда пользователь сказал «сам»)
+_AUTO_CATEGORY = (
+    (r"бег|пробеж|ходь|скакалк|отжима|подтягив|пресс|планк|плаван|бассейн|"
+     r"велосипед|йог|трениров|зарядк|растяж|спорт|гантел|турник|присед|снах?орт",
+     "Спорт"),
+    (r"вод\w*|пить|сон|спать|вес\w*|таблетк|витамин|лекарств|зуб|кож|душ|закалив",
+     "Здоровье"),
+    (r"чита|книг|медит|дневник|рефлекс|аффирмац|саморазв|блог|обзор",
+     "Саморазвитие"),
+    (r"уч\w*|курс|лекц|английск|немецк|испанск|язык|экзамен|домашк|диплом|конспект",
+     "Учеба"),
+    (r"работ|проект|дедлайн|созвон|встреч|почт|задач|отчёт|отчет|митинг",
+     "Работа"),
+    (r"убор|мыть|посуд|стирк|готов|покупк|цвет|растени|мусор|пылесос|постел",
+     "Дом"),
+)
+
+
+def _auto_category(title: str) -> str:
+    """Подбор категории из названия: «бегать» → «Спорт», иначе «Другое»."""
+    t = (title or "").lower()
+    for pattern, name in _AUTO_CATEGORY:
+        if re.search(pattern, t):
+            return name
+    return "Другое"
+
+
+def _parse_schedule(message: str) -> list[str]:
+    """График из текста → токены графика. [] — график не назван."""
+    m = _INTERVAL_WORDS_RE.search(message)
+    if m:
+        return [f"каждые{max(2, min(30, int(m.group(1))))}"]
+    if _EVERY_OTHER_RE.search(message):
+        return ["каждые2"]
+    cleaned, _ = _split_time(message)
+    cleaned = _normalize_shorthand(cleaned)
+    # дни месяца: числа рядом со словами «числа»/«месяц» или суффикс «-го» («1-го и 15-го»)
+    if _MONTH_WORDS_RE.search(cleaned) or re.search(r"\b\d{1,2}\s*-\s*г[оое]\b", cleaned):
+        no_qty = _QUANTITY_RE.sub(" ", cleaned)
+        nums = [
+            int(n) for n in re.findall(r"\b(\d{1,2})\b", no_qty) if 1 <= int(n) <= 31
+        ]
+        if nums:
+            return [str(n) for n in dict.fromkeys(nums)]
+    days = _extract_days(message)
+    if days != list(DAY_CODES):
+        return days
+    if _EVERYDAY_RE.search(message):
+        return list(DAY_CODES)
+    return []
+
+
+def _parse_category_answer(message: str, categories: list[str]) -> str | None:
+    """Категория из ответа: имя существующей / новая / 'AUTO' (отказ) / None."""
+    if _REFUSAL_RE.search(message):
+        return "AUTO"
+    q = _QUOTED_RE.search(message)
+    text = q.group(1) if q else message
+    cand = _clean_title_candidate(text)
+    if not cand:
+        return None
+    cand = re.sub(r"^(?:в|во|к|на|по|для|из)\s+", "", cand, flags=re.IGNORECASE)
+    cand = cand.strip(" \t.,;:!?«»\"'-—")
+    low = cand.lower()
+    if not low or low in _PLACEHOLDER_TITLES or not re.search(r"[а-яёa-z]", low):
+        return None
+    if _AGREE_RE.match(low):
+        return "AUTO"
+    if _title_is_service(cand):
+        return None
+    for c in categories:
+        cl = c.lower()
+        if cl == low or cl in low or low in cl:
+            return c
+    return cand[:1].upper() + cand[1:40]
+
+
+def _parse_step_answer(message: str) -> int | None:
+    """Шаг увеличения из ответа: «5 страниц», «2 подхода», «3»."""
+    cleaned, _ = _split_time(message)
+    cleaned = _normalize_shorthand(cleaned)
+    m = _TARGET_RE.search(cleaned)
+    if m and m.group(2):
+        return max(1, int(m.group(1)))
+    n = re.search(r"\b(\d{1,4})\b", _QUANTITY_RE.sub(" ", cleaned))
+    return max(1, int(n.group(1))) if n else None
+
+
+def _default_step(ans: dict) -> int:
+    """Авто-шаг, когда пользователь сказал «сам» или промолчал."""
+    t = int(ans.get("target") or 1)
+    if (ans.get("unit") or "").lower() == "минута" and t >= 10:
+        return 5  # минуты: шаг в 5 минут удобнее единичной минуты
+    return 1
+
+
+_STAGES = ["category", "schedule", "quantity", "step"]
+
+
+def _stage_filled(stage: str, ans: dict) -> bool:
+    if stage == "category":
+        return bool(ans.get("category"))
+    if stage == "schedule":
+        return bool(ans.get("days"))
+    if stage == "quantity":
+        return bool(ans.get("target")) and bool(ans.get("unit"))
+    if stage == "step":
+        return ans.get("step") is not None
+    return True
+
+
+def _next_stage(cur: str, ans: dict) -> str:
+    try:
+        idx = _STAGES.index(cur)
+    except ValueError:
+        idx = 0
+    for st in _STAGES[idx:]:
+        if not _stage_filled(st, ans):
+            return st
+    return "done"
+
+
+def _ask(stage: str, title: str, categories: list[str], ans: dict) -> str:
+    if stage == "title":
+        return (
+            "Какую привычку добавить? Напиши название — "
+            "например: «Бег», «Медитация», «Пить воду»."
+        )
+    if stage == "category":
+        names = ", ".join(categories) if categories else ""
+        if names:
+            return (
+                f"В какую категорию отнести «{title}»? Есть: {names}. "
+                "Назови одну из них, придумай новую или напиши «сам» — подберу."
+            )
+        return (
+            f"В какую категорию отнести «{title}»? Назови свою или "
+            "напиши «сам» — подберу."
+        )
+    if stage == "schedule":
+        return (
+            f"По каким дням выполнять «{title}»? Например: каждый день, "
+            "по вт и чт, 1-го и 15-го числа, каждые 3 дня."
+        )
+    if stage == "quantity":
+        return (
+            f"Сколько в день «{title}» и в чём мерить? "
+            "Например: 10 минут, 3 раза, 20 страниц."
+        )
+    if stage == "step":
+        return (
+            f"С каким шагом отмечать прогресс по «{title}»? "
+            "Например: 1 отжимание, 5 страниц. Можно написать «сам» — выберу за тебя."
+        )
+    return ""
+
+
+def _created_reply(act: dict, auto: list[str]) -> str:
+    """Фактологичное подтверждение создания: что добавлено, все параметры."""
+    from db import days_label, plural_count
+
+    unit = act["unit"]
+    step = int(act.get("step") or 1)
+    parts = [
+        f"Добавил «{act['title']}» — {act['category']}, "
+        f"{days_label(act['days']).lower()}, "
+        f"{act['target']} {plural_count(act['target'], unit)} в день, "
+        f"шаг {step} {plural_count(step, unit)}."
+    ]
+    if "category" in auto:
+        parts.append(f"Категорию «{act['category']}» подобрал сам.")
+    if "schedule" in auto:
+        parts.append("График «каждый день» поставил сам — скажи, если поменять.")
+    if "quantity" in auto:
+        parts.append("План поставил 1 раз — скорректируй, если нужно.")
+    if "step" in auto:
+        parts.append("Шаг выбрал сам.")
+    return " ".join(parts)
+
+
+def _start_interview(message: str, categories: list[str]) -> tuple[dict, str]:
+    """Начало интервью: вытаскиваем всё названное сразу, задаём первый вопрос."""
+    title = _extract_title(message)
+    ans: dict = {}
+    sched = _parse_schedule(message)
+    if sched:
+        ans["days"] = sched
+    if _has_explicit_quantity(message):
+        ans["target"], ans["unit"] = _extract_target_unit(message)
+    if not title or _title_is_service(title) or title.lower() in _PLACEHOLDER_TITLES:
+        draft = {"title": "", "stage": "title", "ans": {}, "tries": 0, "auto": []}
+        return draft, _ask("title", "", categories, {})
+    stage = _next_stage("category", ans)
+    draft = {"title": title, "stage": stage, "ans": ans, "tries": 0, "auto": []}
+    return draft, _ask(stage, title, categories, ans)
+
+
+def _interview(
+    message: str, draft: dict, categories: list[str]
+) -> tuple[dict | None, str, list[dict]]:
+    """Один шаг интервью. Возвращает (новый черновик | None, реплика, действия)."""
+    title = (draft.get("title") or "").strip()
+    ans = dict(draft.get("ans") or {})
+    tries = int(draft.get("tries") or 0)
+    auto = list(draft.get("auto") or [])
+    stage = draft.get("stage") or "category"
+
+    if stage == "title":
+        t = _extract_title(message)
+        if t and not _title_is_service(t) and t.lower() not in _PLACEHOLDER_TITLES:
+            title = t
+            stage = "category"
+        else:
+            tries += 1
+            if tries >= 3:
+                return None, (
+                    "Название так и не названо — интервью прервал. "
+                    "Напиши «создай привычку <название>», когда будешь готов."
+                ), []
+    elif stage == "category":
+        cat = _parse_category_answer(message, categories)
+        if cat == "AUTO":
+            ans["category"] = _auto_category(title)
+            auto.append("category")
+            tries = 0
+        elif cat:
+            ans["category"] = cat
+            tries = 0
+        else:
+            tries += 1
+            if tries >= 2:  # игнор → подбираем сами
+                ans["category"] = _auto_category(title)
+                auto.append("category")
+                tries = 0
+        # прыжок вперёд: график/количество могли прийти тем же сообщением
+        sched = _parse_schedule(message)
+        if sched and not ans.get("days"):
+            ans["days"] = sched
+        if _has_explicit_quantity(message) and not ans.get("target"):
+            ans["target"], ans["unit"] = _extract_target_unit(message)
+    elif stage == "schedule":
+        sched = _parse_schedule(message)
+        if sched:
+            ans["days"] = sched
+            tries = 0
+        else:
+            # важный параметр — переспрашиваем, игнор не прощаем сразу
+            tries += 1
+            if tries >= 4:
+                ans["days"] = list(DAY_CODES)
+                auto.append("schedule")
+                tries = 0
+        if _has_explicit_quantity(message) and not ans.get("target"):
+            ans["target"], ans["unit"] = _extract_target_unit(message)
+    elif stage == "quantity":
+        if _has_explicit_quantity(message):
+            ans["target"], ans["unit"] = _extract_target_unit(message)
+            tries = 0
+        else:
+            tries += 1
+            if tries >= 4:
+                ans["target"], ans["unit"] = 1, "раз"
+                auto.append("quantity")
+                tries = 0
+        sched = _parse_schedule(message)
+        if sched and not ans.get("days"):
+            ans["days"] = sched
+    elif stage == "step":
+        if _REFUSAL_RE.search(message):
+            ans["step"] = _default_step(ans)
+            auto.append("step")
+            tries = 0
+        else:
+            step = _parse_step_answer(message)
+            if step:
+                ans["step"] = step
+                tries = 0
+            else:
+                tries += 1
+                if tries >= 2:  # игнор → выбираем сами
+                    ans["step"] = _default_step(ans)
+                    auto.append("step")
+                    tries = 0
+    else:
+        stage = "category"
+
+    nxt = _next_stage(stage if stage in _STAGES else "category", ans)
+    if nxt == "done":
+        act = {
+            "type": "add_habit",
+            "title": title,
+            "category": ans.get("category") or "Другое",
+            "emoji": "",
+            "days": ans.get("days") or list(DAY_CODES),
+            "target": int(ans.get("target") or 1),
+            "unit": ans.get("unit") or "раз",
+            "step": int(ans.get("step") or 1),
+        }
+        return None, _created_reply(act, auto), [act]
+
+    if nxt != stage:
+        tries = 0  # счётчик переспрашиваний — свой у каждого вопроса
+    new_draft = {"title": title, "stage": nxt, "ans": ans, "tries": tries, "auto": auto}
+    return new_draft, _ask(nxt, title, categories, ans), []
+
+
 async def parse_intent(
-    message: str, habits: list[dict], history: list[dict], wellbeing: dict | None = None
+    message: str, habits: list[dict], history: list[dict], wellbeing: dict | None = None,
+    draft: dict | None = None, categories: list[str] | None = None,
 ) -> dict:
-    """Точка входа NLP: LLM → при ошибке/отсутствии ключа локальные правила.
-    Оба пути проходят через finalize_plan — reconcile + строгую валидацию
-    (без заглушек, без действий по несуществующим привычкам)."""
+    """Точка входа NLP.
+
+    1) Черновик интервью активен → обрабатываем ответ на текущий вопрос.
+    2) Просьба создать привычку → начинаем интервью (детерминированно,
+       одинаково с LLM-ключом и без).
+    3) Остальные команды → LLM, при сбое/отсутствии ключа fallback, затем
+       finalize_plan (валидация без заглушек и действий по чужим привычкам).
+    План содержит «draft»: новый черновик интервью или None."""
     wellbeing = wellbeing or {}
+    categories = categories or []
+    text = message.lower()
+
+    # другие команды (удаление/снижение/пауза) важнее интервью и создания
+    other_cmd = bool(_OTHER_CMD_RE.search(message))
+    if other_cmd:
+        draft = None
+
+    if draft:
+        if _CANCEL_RE.search(message) and len(message.split()) <= 4:
+            return {
+                "reply": "Отменил создание — черновик стёр.",
+                "actions": [{"type": "none"}],
+                "draft": None,
+            }
+        # «создай привычку X» во время интервью → начинаем заново с новым названием
+        t_new = (
+            _extract_title(message)
+            if (not other_cmd and (_ADD_RE.search(text) or "привычк" in text))
+            else None
+        )
+        if (
+            t_new and not _title_is_service(t_new)
+            and (draft.get("stage") or "") != "title"
+        ):
+            draft, reply = _start_interview(message, categories)
+            return {"reply": reply, "actions": [{"type": "none"}], "draft": draft}
+        new_draft, reply, actions = _interview(message, draft, categories)
+        return {
+            "reply": reply,
+            "actions": actions or [{"type": "none"}],
+            "draft": new_draft,
+        }
+
+    if not other_cmd and (_ADD_RE.search(text) or "привычк" in text):
+        draft, reply = _start_interview(message, categories)
+        return {"reply": reply, "actions": [{"type": "none"}], "draft": draft}
+
     if LLM_API_KEY:
         try:
             plan = await llm_parse(message, habits, history, wellbeing.get("prompt", ""))
@@ -930,4 +1314,15 @@ async def parse_intent(
             plan = fallback_parse(message, habits, wellbeing)
     else:
         plan = fallback_parse(message, habits, wellbeing)
-    return finalize_plan(plan, message, habits)
+    plan = finalize_plan(plan, message, habits)
+
+    # страховка: LLM вернул add_habit → переводим в интервью, ничего не создаём
+    if any(
+        isinstance(a, dict) and a.get("type") == "add_habit"
+        for a in plan.get("actions") or []
+    ):
+        draft, reply = _start_interview(message, categories)
+        return {"reply": reply, "actions": [{"type": "none"}], "draft": draft}
+
+    plan["draft"] = None
+    return plan

@@ -15,18 +15,28 @@ export function toISO(d) {
 }
 
 /**
- * Календарь-скроллер дней: две недели назад … завтра.
+ * Календарь-скроллер дней: от даты первого входа … до +2 недель вперёд.
  * Выбранный день — фиолетовая «пилюля» (одной высоты с остальными днями):
  * код дня недели сверху, под ним белый кружок с числом (как на макете).
  * Клик по дню выбирает его — экран перезагружает привычки за выбранную дату.
  */
-export default function WeekStrip({ habitDays = [], selected, onSelect }) {
+export default function WeekStrip({ habitDays = [], selected, todayISO, startISO, onSelect }) {
   const scrollerRef = useRef(null)
   const today = new Date()
-  const todayISO = toISO(today)
   const days = []
 
-  for (let offset = -13; offset <= 1; offset++) {
+  // от даты первого входа (или от -13 дней, если даты нет) до +2 недель вперёд
+  const DAY = 86400000
+  const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const start =
+    startISO &&
+    (startISO === todayISO || /^-?\d{4}-\d{2}-\d{2}$/.test(startISO))
+      ? new Date(`${startISO}T00:00:00`)
+      : new Date(todayMid.getTime() - 13 * DAY)
+  const startOffset = Math.round((start - todayMid) / DAY)
+  const endOffset = 14 // +2 недели вперёд
+
+  for (let offset = Math.min(startOffset, 0); offset <= endOffset; offset++) {
     const d = shiftDay(today, offset)
     const iso = toISO(d)
     days.push({

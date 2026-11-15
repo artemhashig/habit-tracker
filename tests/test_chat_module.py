@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Интеграционный тест чат-модуля: текст из чата → привычка в базе данных.
 
 Сценарий:
 1. Чистая БД (временная папка, без LLM-ключа → rule-based fallback), без демо-данных.
-2. POST /api/chat: поток сознания + просьба добавить привычку.
+2. POST /api/chat: интервью создания привычки (категория → график → цель → шаг).
 3. Привычка появляется в GET /api/habits (т.е. записана в sqlite).
 4. POST /api/chat: жалоба на усталость → планка снижается, прогресс НЕ сбрасывается.
-5. Клик «+» и «отметить день» работают как раньше.
+5. Клик «+» (шагом привычки) и «отметить день» работают как раньше.
 6. Форма «Новая привычка», удаление привычек/категорий.
 7. Изоляция устройств: X-Device-ID — у каждого свои привычки и история чата.
 """
@@ -41,7 +41,7 @@ print("=== 0. Стартовое состояние: главный экран �
 habits = client.get("/api/habits", headers=DEV).json()
 check("главный экран пуст — люди создают сами", habits == [], str(habits))
 
-print("\n=== 1. Чат: добавление привычки из потока сознания ===")
+print("\n=== 1. Чат: интервью создания привычки из потока сознания ===")
 r = client.post(
     "/api/chat",
     json={"message": "Привет. Вчера не выспался, голова тяжёлая, но решил: добавь привычку «Медитация» 10 минут по утрам каждый день."},
@@ -50,8 +50,22 @@ r = client.post(
 check("POST /api/chat → 200", r.status_code == 200, str(r.status_code))
 data = r.json()
 print("Ответ ассистента:", data["reply"])
+check("привычка не создаётся сразу — идёт интервью",
+      all(a["type"] != "add_habit" for a in data["applied"]), str(data["applied"]))
+check("спрошена категория", "категорию" in data["reply"].lower(), data["reply"])
+
+# график и цель уже были в первом сообщении → следующий вопрос: шаг
+r = client.post("/api/chat", json={"message": "спорт"}, headers=DEV)
+data = r.json()
+check("после категории спрашивается шаг",
+      "шаг" in data["reply"].lower(), data["reply"])
+
+r = client.post("/api/chat", json={"message": "1 раз"}, headers=DEV)
+data = r.json()
+print("Ответ ассистента:", data["reply"])
 print("Применённые действия:", data["applied"])
-check("есть действие add_habit", any(a["type"] == "add_habit" for a in data["applied"]))
+check("есть действие add_habit после интервью",
+      any(a["type"] == "add_habit" for a in data["applied"]), str(data["applied"]))
 
 habits = client.get("/api/habits", headers=DEV).json()
 names = [h["title"] for h in habits]
@@ -60,6 +74,8 @@ med = next(h for h in habits if h["title"] == "Медитация")
 check("цель = 10 минут", med["target"] == 10 and med["unit"] == "минута",
       f"{med['target']} {med['unit']}")
 check("график = каждый день", len(med["days"]) == 7, str(med["days"]))
+check("категория = Спорт", med["category"] == "Спорт", med["category"])
+check("шаг = 1", med["step"] == 1, str(med["step"]))
 check("прогресс с нуля", med["current"] == 0, str(med["current"]))
 
 print("\n=== 2. Чат: усталость → снижение планки без сброса прогресса ===")
@@ -101,8 +117,8 @@ check("медитация закрыта 10/10, статус done", r["current"]
 print("\n=== 4. История чата сохранена в БД ===")
 hist = client.get("/api/chat/history", headers=DEV).json()
 roles = [m["role"] for m in hist]
-check("4 сообщения (2 пользователя, 2 ассистента)",
-      roles.count("user") == 2 and roles.count("assistant") == 2, str(roles))
+check("8 сообщений (4 пользователя, 4 ассистента)",
+      roles.count("user") == 4 and roles.count("assistant") == 4, str(roles))
 
 print("\n=== 5. Форма «Новая привычка»: ручное создание ===")
 r = client.post(
@@ -178,14 +194,14 @@ still = next(h for h in client.get("/api/habits", headers=DEV).json()
 check("у владельца привычка цела (1/40)", still["current"] == 1 and still["target"] == 40,
       f"{still['current']}/{still['target']}")
 
-# чат тоже изолирован
-r = client.post("/api/chat", json={"message": "добавь привычку «Прогулка» 1 раз в день"},
-                headers=DEV2)
+# чат тоже изолирован: интервью «Прогулки» не видно device-1
+for msg in ("добавь привычку «Прогулка» 1 раз в день", "спорт", "каждый день", "1 раз"):
+    r = client.post("/api/chat", json={"message": msg}, headers=DEV2)
 check("чат device-2 → 200", r.status_code == 200)
 hist2 = client.get("/api/chat/history", headers=DEV2).json()
-check("у device-2 своя история (2 сообщения)",
-      len(hist2) == 2 and all(m["role"] for m in hist2),
-      str([m["role"] for m in hist2]))
+check("у device-2 своя история (8 сообщений)",
+      len(hist2) == 8 and all(m["role"] for m in hist2),
+      str(len(hist2)))
 hist1 = client.get("/api/chat/history", headers=DEV).json()
 check("история device-1 не содержит чужих сообщений",
       not any("Прогулка" in m["content"] for m in hist1))
@@ -337,13 +353,22 @@ check("повторный визит не дублирует гостя", me2.ge
 print("\n=== 12. Тонкий разбор: время суток ≠ количество, «N/д», дни из текста ===")
 DEV5 = {"X-Device-ID": "device-5", "Content-Type": "application/json"}
 
-# реальный провал LLM №1: время суток уходило в target, дни размазывались на неделю
+# реальный провал LLM №1: время суток уходило в target, дни размазывались на неделю.
+# Создание идёт через интервью: график/цель из текста, категория и шаг — вопросами
 r = client.post(
     "/api/chat",
     json={"message": "создай привычку в 13:00 вечера прыгать на скакалке по вт 3/д"},
     headers=DEV5,
 )
 check("чат device-5 → 200", r.status_code == 200)
+data = r.json()
+check("интервью: спрашивает категорию",
+      "категорию" in data["reply"].lower(), data["reply"])
+r = client.post("/api/chat", json={"message": "спорт"}, headers=DEV5)
+data = r.json()
+check("интервью: спрашивает шаг (дни и цель уже из текста)",
+      "шаг" in data["reply"].lower(), data["reply"])
+r = client.post("/api/chat", json={"message": "1 раз"}, headers=DEV5)
 rope = next((h for h in client.get("/api/habits", headers=DEV5).json()
              if "скакалке" in h["title"]), None)
 check("название «Прыгать на скакалке в 13:00»",
@@ -361,6 +386,8 @@ r = client.post(
     headers=DEV5,
 )
 check("второй чат device-5 → 200", r.status_code == 200)
+client.post("/api/chat", json={"message": "спорт"}, headers=DEV5)
+r = client.post("/api/chat", json={"message": "1 раз"}, headers=DEV5)
 jump = next((h for h in client.get("/api/habits", headers=DEV5).json()
              if h["title"] in ("Прыгать", "Прыгнуть")), None)
 check("название = «Прыгать» (без служебного)",
@@ -429,17 +456,136 @@ check("несуществующую привычку удалить нельзя
 check("бассейн остался на месте",
       any(h["title"] == "Бассейн" for h in client.get("/api/habits", headers=DEV6).json()))
 
-# неполное описание привычки — уточняющий вопрос, а не дефолтная планка
+# неполное описание привычки — интервью: категория → шаг, создание по всем правилам
 r = client.post(
     "/api/chat",
     json={"message": "добавь привычку читать книги"},
     headers=DEV6,
 )
 data = r.json()
-check("«читать книги» без графика → без создания",
+check("«читать книги» → интервью, без создания",
       all(a["type"] != "add_habit" for a in data["applied"]), str(data["applied"]))
-check("уточняются недостающие детали",
-      "по каким дням" in data["reply"] and "сколько" in data["reply"], data["reply"])
+check("спрошена категория", "категорию" in data["reply"].lower(), data["reply"])
+for ans in ("Саморазвитие", "каждый день", "20 страниц", "1 страница"):
+    r = client.post("/api/chat", json={"message": ans}, headers=DEV6)
+data = r.json()
+check("книги созданы после интервью",
+      any(a["type"] == "add_habit" for a in data["applied"]), str(data["applied"]))
+books = next(
+    (h for h in client.get("/api/habits", headers=DEV6).json() if "книг" in h["title"]),
+    None,
+)
+check("книги: Саморазвитие, каждый день, 20 страниц, шаг 1",
+      books is not None and books["category"] == "Саморазвитие"
+      and len(books["days"]) == 7 and books["target"] == 20
+      and books["unit"] == "страница" and books["step"] == 1,
+      str(books and (books["category"], books["days"], books["target"], books["step"])))
+
+print("\n=== 14. Интервью: отказы/игнор, дни месяца, интервал, отмена ===")
+DEV7 = {"X-Device-ID": "device-7", "Content-Type": "application/json"}
+
+def chat7(msg: str):
+    return client.post("/api/chat", json={"message": msg}, headers=DEV7).json()
+
+# полный диалог с отказами: категорию и шаг подбираем сами, график — важно, переспрашиваем
+data = chat7("давай заведу привычку бег")
+check("интервью бег: вопрос о категории", "категорию" in data["reply"].lower(), data["reply"])
+data = chat7("сам")
+check("отказ от категории → подобрали сами, вопрос о днях",
+      "по каким дням" in data["reply"].lower(), data["reply"])
+data = chat7("не знаю")
+check("неопределённый график → важный вопрос задан снова",
+      "по каким дням" in data["reply"].lower()
+      and all(a["type"] != "add_habit" for a in data["applied"]), data["reply"])
+data = chat7("по вт")
+check("после графика вопрос о количестве", "сколько" in data["reply"].lower(), data["reply"])
+data = chat7("3 раза")
+check("после количества вопрос о шаге", "шаг" in data["reply"].lower(), data["reply"])
+data = chat7("не знаю")
+check("бег создан с авто-категорией и авто-шагом",
+      any(a["type"] == "add_habit" for a in data["applied"])
+      and "подобрал сам" in data["reply"] and "Шаг выбрал сам" in data["reply"],
+      data["reply"])
+run7 = next((h for h in client.get("/api/habits", headers=DEV7).json()
+             if h["title"] == "Бег"), None)
+check("бег: Спорт, вт, 3 раза, шаг 1",
+      run7 is not None and run7["category"] == "Спорт" and run7["days"] == ["Вт"]
+      and run7["target"] == 3 and run7["step"] == 1,
+      str(run7 and (run7["category"], run7["days"], run7["target"], run7["step"])))
+
+# дни месяца: «1-го и 15-го» → токены «1» и «15»
+chat7("создай привычку пить воду")
+chat7("здоровье")
+chat7("1-го и 15-го")
+chat7("2 стакана")
+data = chat7("сам")
+water7 = next((h for h in client.get("/api/habits", headers=DEV7).json()
+               if h["title"] == "Пить воду"), None)
+check("вода: дни месяца 1 и 15",
+      water7 is not None and water7["days"] == ["1", "15"],
+      str(water7 and water7["days"]))
+check("вода: метка «числа месяца»",
+      water7 is not None and "числа месяца" in water7["daysLabel"],
+      str(water7 and water7["daysLabel"]))
+from datetime import date as _date  # noqa: E402
+
+day15 = _date.today().replace(day=15).isoformat()
+day2 = _date.today().replace(day=2).isoformat()
+v15 = next((h for h in client.get(f"/api/habits?date={day15}", headers=DEV7).json()
+            if h["title"] == "Пить воду"), None)
+v2 = next((h for h in client.get(f"/api/habits?date={day2}", headers=DEV7).json()
+           if h["title"] == "Пить воду"), None)
+check("15-го запланирована, 2-го нет",
+      v15 is not None and v15["scheduledToday"] and v2 is not None
+      and not v2["scheduledToday"],
+      f"15-е: {v15 and v15['scheduledToday']}, 2-е: {v2 and v2['scheduledToday']}")
+
+# интервал: «каждые 3 дня»
+chat7("создай привычку уборка")
+chat7("дом")
+chat7("каждые 3 дня")
+chat7("1 раз")
+data = chat7("2")
+tidy = next((h for h in client.get("/api/habits", headers=DEV7).json()
+             if h["title"] == "Уборка"), None)
+check("уборка: интервал каждые 3 дня, шаг 2",
+      tidy is not None and tidy["days"] == ["каждые3"] and tidy["step"] == 2,
+      str(tidy and (tidy["days"], tidy["step"])))
+check("уборка: метка «каждые 3 дн.»",
+      tidy is not None and "каждые 3 дн." in tidy["daysLabel"].lower(),
+      str(tidy and tidy["daysLabel"]))
+
+# «+» добавляет шаг привычки
+st = client.post(
+    "/api/habits",
+    json={"title": "Приседания", "category": "Спорт", "target": 30, "unit": "раз", "step": 5},
+    headers=DEV7,
+).json()
+r = client.post(f"/api/habits/{st['id']}/increment", headers=DEV7).json()
+check("«+» добавляет шаг 5, а не 1", r["current"] == 5, str(r["current"]))
+
+# отмена интервью: черновик стирается, следующих вопросов нет
+chat7("создай привычку шахматы")
+data = chat7("отмена")
+check("отмена подтверждена", "Отменил" in data["reply"], data["reply"])
+data = chat7("привет")
+check("после отмены интервью не продолжается",
+      "категорию" not in data["reply"].lower(), data["reply"])
+check("шахмат в базе нет",
+      not any(h["title"] == "Шахматы" for h in client.get("/api/habits", headers=DEV7).json()))
+
+# другие команды рвут интервью: удаление срабатывает, черновик исчезает
+client.post("/api/habits", json={"title": "Планка", "target": 1}, headers=DEV7)
+chat7("создай привычку растяжка")
+data = chat7("удали привычку планка")
+check("удаление во время интервью сработало",
+      any(a["type"] == "delete_habit" for a in data["applied"]), str(data["applied"]))
+data = chat7("привет")
+check("после удаления интервью не продолжается",
+      "категорию" not in data["reply"].lower(), data["reply"])
+check("растяжка не создана, планка удалена",
+      not any(h["title"] in ("Растяжка", "Планка")
+              for h in client.get("/api/habits", headers=DEV7).json()))
 
 print()
 if failures:

@@ -26,6 +26,21 @@ const MONTHS_GEN = [
   'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
 ]
 
+/** День (YYYY-MM-DD) попадает в график привычки: дни недели / дни месяца / интервал. */
+function scheduledOn(iso, days = [], createdAt = '') {
+  const d = new Date(`${iso}T00:00:00`)
+  return (days || []).some((tok) => {
+    if (/^\d{1,2}$/.test(String(tok))) return d.getDate() === Number(tok)
+    const m = /^каждые(\d{1,2})$/.exec(tok)
+    if (m && createdAt && /^\d{4}-\d{2}-\d{2}$/.test(createdAt)) {
+      const c = new Date(`${createdAt}T00:00:00`)
+      const diff = Math.round((d - c) / 86400000)
+      return diff >= 0 && diff % Math.max(1, Number(m[1])) === 0
+    }
+    return WEEKDAY_RU_STRIP[d.getDay()] === tok
+  })
+}
+
 /** Карточка одной категории: удержание → окно удаления категории. */
 function CategorySection({
   name,
@@ -94,6 +109,7 @@ export default function App() {
   const [toast, setToast] = useState(null) // { text, key } — уведомление
   const [deleteTarget, setDeleteTarget] = useState(null) // { kind: 'habit'|'category', ... }
   const [deleting, setDeleting] = useState(false)
+  const [startISO, setStartISO] = useState('') // дата первого входа (для ленты дней)
   const toastTimer = useRef(null)
 
   const refreshHabits = useCallback(() => {
@@ -106,6 +122,16 @@ export default function App() {
   useEffect(() => {
     refreshHabits()
   }, [refreshHabits])
+
+  useEffect(() => {
+    // Профиль гостя: дата первого визита — от неё рисуем ленту дней
+    api('/api/me')
+      .then((r) => r.json())
+      .then((u) => {
+        if (u?.created_at) setStartISO(u.created_at)
+      })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     // Проактивная модель ментального здоровья: если срок контрольной точки вышел,
@@ -128,9 +154,11 @@ export default function App() {
 
   const handleIncrement = useCallback(
     (id) => {
-      // оптимистичный отклик: счётчик растёт мгновенно, сервер подтверждает следом
+      // оптимистичный отклик: счётчик растёт на ШАГ привычки, сервер подтверждает следом
       setHabits((prev) =>
-        prev?.map((h) => (h.id === id ? { ...h, current: (h.current || 0) + 1 } : h)) ?? prev,
+        prev?.map((h) =>
+          h.id === id ? { ...h, current: (h.current || 0) + (h.step || 1) } : h,
+        ) ?? prev,
       )
       // отмечаем выполнение в ПРОСМАТРИВАЕМЫЙ день (вчера / сегодня / …)
       api(`/api/habits/${id}/increment?date=${selected}`, { method: 'POST' })
@@ -176,25 +204,19 @@ export default function App() {
     }
   }
 
-  // День просматриваемой даты (код недели) — чтобы скрыть не-свои привычки
-  const viewWeekday = useMemo(
-    () => WEEKDAY_RU_STRIP[new Date(`${selected}T00:00:00`).getDay()],
-    [selected],
-  )
-
   // Группировка по категориям (порядок как в БД): на день показываем только
   // привычки этого дня (запланированы, закрыты в нём или на паузе в свой день)
   const groups = useMemo(() => {
     if (!Array.isArray(habits)) return []
     const acc = new Map()
     for (const h of habits) {
-      const onSchedule = (h.days ?? []).includes(viewWeekday)
+      const onSchedule = scheduledOn(selected, h.days, h.createdAt)
       if (!(h.scheduledToday || h.current > 0 || (h.frozen && onSchedule))) continue
       if (!acc.has(h.category)) acc.set(h.category, [])
       acc.get(h.category).push(h)
     }
     return [...acc.entries()].map(([name, items]) => ({ name, items }))
-  }, [habits, viewWeekday])
+  }, [habits, selected])
 
   // Дни недели, на которые что-то запланировано (для кружков в ленте)
   const habitDays = useMemo(
@@ -249,6 +271,7 @@ export default function App() {
           habitDays={habitDays}
           selected={selected}
           todayISO={todayISO}
+          startISO={startISO}
           onSelect={(iso) => setSelected(iso)}
         />
 

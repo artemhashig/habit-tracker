@@ -73,7 +73,7 @@ def _slots(
         for d in window:
             if d < created:
                 continue
-            if db._weekday_ru(d) not in days:
+            if not db._scheduled_on(d, days, created):
                 continue
             if db._on_freeze(d, window_pair):
                 continue  # пауза — день не считается ни планом, ни пропуском
