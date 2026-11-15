@@ -720,6 +720,44 @@ check("зачёт: 2 лабы (единица нормализована)",
       str(zach and (zach["target"], zach["unit"])))
 check("склонение «2 лабы» в подтверждении", "2 лабы" in data["reply"], data["reply"])
 
+print("\n=== 17. Интервальные графики словами: «каждые четные дни», «каждый третий день» ===")
+DEV10 = {"X-Device-ID": "device-10", "Content-Type": "application/json"}
+
+def chat10(msg: str):
+    return client.post("/api/chat", json={"message": msg}, headers=DEV10).json()
+
+# «каждые четные дни» — это «каждые 2 дня», а НЕ дни месяца «2, 4, 6»
+chat10("хочу сдавать лабы")
+chat10("сам")  # категория: подбери (Учеба)
+data = chat10("каждые четные дни")
+check("«каждые четные дни» → вопрос о количестве (не о днях)",
+      "сколько" in data["reply"].lower(), data["reply"])
+chat10("1 лабу в день")
+data = chat10("да")
+evn = next((h for h in client.get("/api/habits", headers=DEV10).json()
+            if "лаб" in h["title"]), None)
+check("«каждые четные дни» → токен «каждые2», не список дат",
+      evn is not None and evn["days"] == ["каждые2"],
+      str(evn and (evn["days"], evn["target"], evn["unit"])))
+check("подтверждение: «каждые 2 дн.» без перечня чисел месяца",
+      "каждые 2 дн." in data["reply"] and "числа месяца" not in data["reply"],
+      data["reply"])
+
+# «каждый третий день» → «каждые3», «через 2 дня» → «каждые3»
+from llm import _parse_schedule  # noqa: E402
+check("«каждый третий день» → «каждые3»",
+      _parse_schedule("каждый третий день") == ["каждые3"],
+      str(_parse_schedule("каждый третий день")))
+check("«через 2 дня» → «каждые3» (перерыв в 2 дня)",
+      _parse_schedule("через 2 дня") == ["каждые3"],
+      str(_parse_schedule("через 2 дня")))
+check("«каждый вторник» → вторник, не интервал",
+      _parse_schedule("каждый вторник") == ["Вт"],
+      str(_parse_schedule("каждый вторник")))
+check("«1-го и 15-го» остаются днями месяца",
+      _parse_schedule("1-го и 15-го числа") == ["1", "15"],
+      str(_parse_schedule("1-го и 15-го числа")))
+
 print()
 if failures:
     print("ИТОГ: НЕ ПРОЙДЕНО ->", failures)
